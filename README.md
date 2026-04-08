@@ -28,15 +28,6 @@ Displays Anthropic account usage information.
 - Computes the 7-day pace difference
 - Only appears when the selected model belongs to an Claude provider
 
-## File structure
-
-```text
-.
-├── branch-pr-widget.ts
-├── usage-widget.ts
-└── LICENSE
-```
-
 ## Usage
 
 1. Make sure [pi-coding-agent](https://github.com/nicholasgasior/pi-coding-agent) is installed and configured
