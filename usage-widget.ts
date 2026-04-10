@@ -100,11 +100,6 @@ async function fetchUsage(apiKey: string): Promise<UsageResponse | null> {
 
 const WIDGET_ID = "anthropic-usage";
 const MIN_REFRESH_GAP_MS = 3 * 60 * 1000;
-const CLAUDE_PROVIDERS = ["anthropic", "claude-bridge"];
-
-function isClaudeProvider(provider: string): boolean {
-	return CLAUDE_PROVIDERS.includes(provider);
-}
 
 export default function (pi: ExtensionAPI) {
 	let lastData: UsageResponse | null = null;
@@ -126,8 +121,7 @@ export default function (pi: ExtensionAPI) {
 
 	async function refreshUsage(ctx: ExtensionContext, force = false) {
 		if (!force && Date.now() - lastRefreshTime < MIN_REFRESH_GAP_MS) return;
-		let apiKey = await ctx.modelRegistry.getApiKeyForProvider("anthropic");
-		if (!apiKey) apiKey = await ctx.modelRegistry.getApiKeyForProvider("claude-bridge");
+		const apiKey = await ctx.modelRegistry.getApiKeyForProvider("anthropic");
 		if (!apiKey) return;
 		const data = await fetchUsage(apiKey);
 		if (data) {
@@ -137,7 +131,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
-		isAnthropicModel = ctx.model ? isClaudeProvider(ctx.model.provider) : true;
+		isAnthropicModel = ctx.model ? ctx.model.provider === "anthropic" : true;
 		await refreshUsage(ctx, true);
 		if (isAnthropicModel && lastData) showWidget(ctx);
 	});
@@ -150,7 +144,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("model_select", async (event, ctx) => {
-		isAnthropicModel = isClaudeProvider(event.model.provider);
+		isAnthropicModel = event.model.provider === "anthropic";
 		if (isAnthropicModel) {
 			if (lastData) showWidget(ctx);
 			else await refreshUsage(ctx, true);
