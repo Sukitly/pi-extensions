@@ -32,7 +32,7 @@ export default function (pi: ExtensionAPI) {
 		const pr = lastPr;
 		ctx.ui.setWidget(
 			WIDGET_ID,
-			(_tui, theme) => new Text(osc8Link(pr.url, theme.fg("accent", `#${pr.number}`)), 0, 0),
+			(_tui, theme) => new Text(theme.fg("accent", `#${pr.number}`) + `: ${pr.url}`, 0, 0),
 		);
 	}
 
