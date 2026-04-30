@@ -8,6 +8,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 const WIDGET_ID = "docs-changes";
+const MAX_VISIBLE_CHANGES = 8;
 
 interface DocsChange {
 	prefix: string;
@@ -71,8 +72,13 @@ export default function (pi: ExtensionAPI) {
 				modified: "warning",
 				deleted: "error",
 			} as const;
-			const parts = changes.map((c) => theme.fg(colorMap[c.kind], `${c.prefix}${c.file}`));
-			return new Text(parts.join("\n"), 0, 0);
+			const visibleChanges = changes.slice(0, MAX_VISIBLE_CHANGES);
+			const parts = visibleChanges.map((c) => theme.fg(colorMap[c.kind], `${c.prefix}${c.file}`));
+			const hiddenCount = changes.length - visibleChanges.length;
+			if (hiddenCount > 0) {
+				parts.push(theme.fg("dim", `… ${hiddenCount} more`));
+			}
+			return new Text(parts.join(theme.fg("dim", "  ·  ")), 0, 0);
 		});
 	}
 
