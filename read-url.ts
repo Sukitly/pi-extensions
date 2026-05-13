@@ -13,7 +13,7 @@ const TTL_DAYS = 30;
 const TTL_MS = TTL_DAYS * 24 * 60 * 60 * 1000;
 
 const READ_URL_PARAMS = Type.Object({
-	url: Type.String({ description: "HTTP/HTTPS URL to read. By default the URL is canonicalized before fetching and caching: fragments are removed, query parameters are stripped, and non-root trailing slashes are removed." }),
+	url: Type.String({ description: "HTTPS URL to read. Non-HTTPS URLs are refused. By default the URL is canonicalized before fetching and caching: fragments are removed, query parameters are stripped, and non-root trailing slashes are removed." }),
 	offset: Type.Optional(Type.Integer({ minimum: 1, description: "1-based line offset for pagination. Defaults to 1. Use the returned Next offset to continue reading long documents." })),
 	limit: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_LIMIT, description: `Number of lines to return. Defaults to ${DEFAULT_LIMIT}, max ${MAX_LIMIT}. Usually omit this parameter; only set it when you intentionally want a shorter preview or a larger page.` })),
 	refresh: Type.Optional(Type.Boolean({ description: "Force re-fetch from Jina Reader and overwrite cache. Defaults to false. Do not use unless the user explicitly asks for the latest version, cache refresh, or cached content appears stale." })),
@@ -110,8 +110,8 @@ type CachedDocument = {
 function normalizeUrl(input: string, options: { preserveQuery: boolean }): NormalizedUrl {
 	const inputUrl = input.trim();
 	const parsed = new URL(inputUrl);
-	if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-		throw new Error(`Only http/https URLs are supported: ${input}`);
+	if (parsed.protocol !== "https:") {
+		throw new Error(`Only HTTPS URLs are supported. Refusing non-HTTPS URL: ${input}`);
 	}
 
 	parsed.hostname = parsed.hostname.toLowerCase();
@@ -512,7 +512,7 @@ export default function jinaReaderExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "read_url",
 		label: "read_url",
-		description: "Read an HTTP/HTTPS URL as LLM-friendly Markdown using Jina Reader. Uses 30-day local cache by default, canonicalizes document URLs, and supports line-based pagination.",
+		description: "Read an HTTPS URL as LLM-friendly Markdown using Jina Reader. Refuses non-HTTPS URLs, uses 30-day local cache by default, canonicalizes document URLs, and supports line-based pagination.",
 		promptSnippet: "Read a URL as Markdown with offset/limit pagination",
 		promptGuidelines: [
 			"Use read_url when the user asks you to inspect or compare external documentation links.",

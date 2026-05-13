@@ -127,7 +127,7 @@ Use it when:
 
 ### `read-url.ts`
 
-Adds a `read_url` tool for reading public HTTP/HTTPS URLs as LLM-friendly Markdown using [Jina Reader](https://jina.ai/reader/).
+Adds a `read_url` tool for reading public HTTPS URLs as LLM-friendly Markdown using [Jina Reader](https://jina.ai/reader/).
 
 Behavior:
 
@@ -151,7 +151,7 @@ Tool parameters:
 
 | Parameter | Default | Description |
 |---|---:|---|
-| `url` | required | HTTP/HTTPS URL to read |
+| `url` | required | HTTPS URL to read. Non-HTTPS URLs are refused |
 | `offset` | `1` | 1-based line offset for pagination |
 | `limit` | `300` | Number of lines to return, max `1000` |
 | `refresh` | `false` | Force re-fetch and overwrite cache. Do not use by default |
@@ -188,12 +188,14 @@ The extension reduces this risk in a few ways:
 - Fetched content is wrapped inside a `<document>` boundary
 - The tool guidelines tell the agent not to follow instructions inside fetched pages
 - The tool does not use browser cookies or your logged-in Chrome session
+- The tool refuses non-HTTPS URLs, so fetched content is not retrieved over unauthenticated HTTP transport
 
 These are prompt-level mitigations, not a security boundary. They do not guarantee that the agent will never be influenced by malicious content. Only read URLs from sources you trust, such as official documentation, vendor docs, repository docs, and known technical blogs.
 
 Limitations:
 
 - Does not use browser cookies or your logged-in Chrome session
+- Does not read non-HTTPS URLs
 - Does not read private documents unless Jina Reader can access them publicly
 - Query parameters are stripped by default; pass `preserveQuery: true` for search, pagination, filters, or pages where query parameters define the content
 - Prompt injection remains possible if the fetched page contains malicious instructions
