@@ -10,6 +10,7 @@ A small collection of extensions for [pi-coding-agent](https://github.com/badlog
 | `branch-pr-widget.ts` | Shows the GitHub PR for the current branch | Auto-runs on session start and after agent turns | `gh` installed, current repo branch associated with a PR |
 | `docs-changes.ts` | Shows changed files under `docs/` as a widget | Auto-runs on session start and after agent turns | Git repo with a `docs/` directory |
 | `replace-pi-with-claude-code.ts` | Rewrites `pi` to `claude code` in the system prompt | Auto-runs before each agent start | None |
+| `read-url.ts` | Adds a `read_url` tool that reads public URLs as Markdown through Jina Reader | Agent calls `read_url` when it needs external docs | Optional `JINA_API_KEY` for authenticated Jina quota |
 | `usage-widget.ts` | Shows Anthropic or Codex usage bars for the active provider | Auto-runs on session start, model change, and after agent turns | Valid Anthropic OAuth or OpenAI Codex auth |
 
 ## Installation
@@ -21,6 +22,7 @@ cp auth-backup.ts ~/.pi/agent/extensions/
 cp branch-pr-widget.ts ~/.pi/agent/extensions/
 cp docs-changes.ts ~/.pi/agent/extensions/
 cp replace-pi-with-claude-code.ts ~/.pi/agent/extensions/
+cp read-url.ts ~/.pi/agent/extensions/
 cp usage-widget.ts ~/.pi/agent/extensions/
 ```
 
@@ -123,6 +125,65 @@ Use it when:
 
 - you want the agent framed as Claude Code instead of pi
 
+### `read-url.ts`
+
+Adds a `read_url` tool for reading public HTTP/HTTPS URLs as LLM-friendly Markdown using [Jina Reader](https://jina.ai/reader/).
+
+Behavior:
+
+- Registers a `read_url` tool callable by the agent
+- Uses anonymous Jina Reader requests first
+- Falls back to `JINA_API_KEY` when anonymous quota is exhausted and the environment variable is set
+- Caches successful fetches for 30 days under `~/.pi/agent/caches/read-url/`
+- Stores each cached document as:
+  - `content.md`
+  - `meta.json`
+- Uses readable cache directory names, with a short URL hash suffix to avoid collisions
+- Canonicalizes document URLs by default:
+  - removes fragments
+  - strips query parameters
+  - removes non-root trailing slashes
+- Supports line-based pagination with `offset` and `limit`
+- Provides compact TUI rendering, with expandable results
+- Returns actionable error messages for Jina rate limits, missing API keys, invalid API keys, insufficient balance, and stale-cache fallback
+
+Tool parameters:
+
+| Parameter | Default | Description |
+|---|---:|---|
+| `url` | required | HTTP/HTTPS URL to read |
+| `offset` | `1` | 1-based line offset for pagination |
+| `limit` | `300` | Number of lines to return, max `1000` |
+| `refresh` | `false` | Force re-fetch and overwrite cache. Do not use by default |
+| `preserveQuery` | `false` | Preserve query parameters when they are required for page content |
+
+Cache example:
+
+```text
+~/.pi/agent/caches/read-url/
+  openai.com--index-introducing-trusted-contact-in-chatgpt--178cf0649d10/
+    content.md
+    meta.json
+```
+
+Optional authenticated quota:
+
+```bash
+export JINA_API_KEY="..."
+```
+
+Use it when:
+
+- you want the agent to inspect public documentation, blog posts, changelogs, or API references
+- you want cached URL reading with pagination instead of manually pasting Markdown into the prompt
+- you want anonymous Jina usage by default, with API-key fallback only when needed
+
+Limitations:
+
+- Does not use browser cookies or your logged-in Chrome session
+- Does not read private documents unless Jina Reader can access them publicly
+- Query parameters are stripped by default; pass `preserveQuery: true` for search, pagination, filters, or pages where query parameters define the content
+
 ### `usage-widget.ts`
 
 Shows usage information for the active provider when supported.
@@ -165,6 +226,7 @@ Use it when:
 | `branch-pr-widget.ts` | Hidden when no PR is associated with the current branch or `gh` is unavailable. |
 | `docs-changes.ts` | Hidden when there is no `docs/` directory or no matching changes. |
 | `replace-pi-with-claude-code.ts` | Only affects prompt text, not UI labels or command names. |
+| `read-url.ts` | Reads public URLs through Jina Reader. Set `JINA_API_KEY` only if you want authenticated fallback after anonymous quota is exhausted. |
 | `usage-widget.ts` | Hidden when the active provider is unsupported or no usage data is available. |
 
 ## License
