@@ -178,11 +178,26 @@ Use it when:
 - you want cached URL reading with pagination instead of manually pasting Markdown into the prompt
 - you want anonymous Jina usage by default, with API-key fallback only when needed
 
+Security note:
+
+`read_url` puts external webpage content into the agent context. Treat every fetched page as untrusted input. Do not read random links, suspicious pages, or user-generated content you do not trust. A page can contain prompt injection text that tells the agent to ignore previous instructions, reveal secrets, call tools, run commands, or follow links.
+
+The extension reduces this risk in a few ways:
+
+- Tool output labels fetched content as untrusted external content
+- Fetched content is wrapped inside a `<document>` boundary
+- The tool guidelines tell the agent not to follow instructions inside fetched pages
+- The tool does not use browser cookies or your logged-in Chrome session
+- `JINA_API_KEY` is sent only as an HTTP header to Jina Reader and is not written to the tool output or cache metadata
+
+These are prompt-level mitigations, not a security boundary. They do not guarantee that the agent will never be influenced by malicious content. Only read URLs from sources you trust, such as official documentation, vendor docs, repository docs, and known technical blogs.
+
 Limitations:
 
 - Does not use browser cookies or your logged-in Chrome session
 - Does not read private documents unless Jina Reader can access them publicly
 - Query parameters are stripped by default; pass `preserveQuery: true` for search, pagination, filters, or pages where query parameters define the content
+- Prompt injection remains possible if the fetched page contains malicious instructions
 
 ### `usage-widget.ts`
 
