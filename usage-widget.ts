@@ -180,7 +180,7 @@ async function fetchUsage(provider: string, apiKey: string): Promise<UsageRespon
 	return null;
 }
 
-function supportsUsageWidget(provider: string | undefined): boolean {
+function supportsUsageWidget(provider: string | null | undefined): boolean {
 	return provider === "anthropic" || provider === "openai-codex";
 }
 
@@ -190,59 +190,101 @@ const MIN_REFRESH_GAP_MS = 3 * 60 * 1000;
 export default function (pi: ExtensionAPI) {
 	const usageCache = new Map<string, { data: UsageResponse; refreshedAt: number }>();
 	let activeProvider: string | null = null;
+	let lifecycleToken = 0;
 
 	function getCachedUsage(provider: string | null): UsageResponse | null {
 		if (!provider) return null;
 		return usageCache.get(provider)?.data ?? null;
 	}
 
-	function showWidget(ctx: ExtensionContext) {
-		const data = getCachedUsage(activeProvider);
-		if (!data) return;
-		ctx.ui.setWidget(
-			WIDGET_ID,
-			(_tui, theme) => new Text(buildWidgetLine(data, theme), 0, 0),
-			{ placement: "belowEditor" },
-		);
+	function isCurrent(token: number, provider: string | null): boolean {
+		return token === lifecycleToken && provider === activeProvider;
 	}
 
-	function hideWidget(ctx: ExtensionContext) {
-		ctx.ui.setWidget(WIDGET_ID, undefined);
+	function isStaleContextError(error: unknown): boolean {
+		return error instanceof Error && error.message.includes("ctx is stale");
 	}
 
-	async function refreshUsage(ctx: ExtensionContext, force = false) {
-		if (!activeProvider || !supportsUsageWidget(activeProvider)) return;
-		const cached = usageCache.get(activeProvider);
-		if (!force && cached && Date.now() - cached.refreshedAt < MIN_REFRESH_GAP_MS) return;
-		const apiKey = await ctx.modelRegistry.getApiKeyForProvider(activeProvider);
-		if (!apiKey) return;
-		const data = await fetchUsage(activeProvider, apiKey);
-		if (data) {
-			usageCache.set(activeProvider, { data, refreshedAt: Date.now() });
+	function ignoreStaleContext(fn: () => void) {
+		try {
+			fn();
+		} catch (error) {
+			if (!isStaleContextError(error)) throw error;
 		}
 	}
 
+	function showWidget(ctx: ExtensionContext, provider: string | null) {
+		const data = getCachedUsage(provider);
+		if (!data) return;
+		ignoreStaleContext(() => {
+			ctx.ui.setWidget(
+				WIDGET_ID,
+				(_tui, theme) => new Text(buildWidgetLine(data, theme), 0, 0),
+				{ placement: "belowEditor" },
+			);
+		});
+	}
+
+	function hideWidget(ctx: ExtensionContext) {
+		ignoreStaleContext(() => {
+			ctx.ui.setWidget(WIDGET_ID, undefined);
+		});
+	}
+
+	async function refreshUsage(ctx: ExtensionContext, provider: string | null, force = false) {
+		if (!provider || !supportsUsageWidget(provider)) return;
+		const cached = usageCache.get(provider);
+		if (!force && cached && Date.now() - cached.refreshedAt < MIN_REFRESH_GAP_MS) return;
+		const apiKey = await ctx.modelRegistry.getApiKeyForProvider(provider);
+		if (!apiKey) return;
+		const data = await fetchUsage(provider, apiKey);
+		if (data) {
+			usageCache.set(provider, { data, refreshedAt: Date.now() });
+		}
+	}
+
+	pi.on("session_shutdown", async () => {
+		lifecycleToken++;
+		activeProvider = null;
+	});
+
 	pi.on("session_start", async (_event, ctx) => {
-		activeProvider = ctx.model?.provider ?? null;
-		if (supportsUsageWidget(activeProvider ?? undefined)) {
-			await refreshUsage(ctx, true);
-			if (getCachedUsage(activeProvider)) showWidget(ctx);
+		const provider = ctx.model?.provider ?? null;
+		const token = lifecycleToken;
+		activeProvider = provider;
+
+		if (supportsUsageWidget(provider)) {
+			await refreshUsage(ctx, provider, true);
+			if (!isCurrent(token, provider)) return;
+			if (getCachedUsage(provider)) showWidget(ctx, provider);
+			else hideWidget(ctx);
+		} else {
+			hideWidget(ctx);
 		}
 	});
 
 	pi.on("agent_end", async (_event, ctx) => {
-		if (supportsUsageWidget(activeProvider ?? undefined)) {
-			await refreshUsage(ctx);
-			if (getCachedUsage(activeProvider)) showWidget(ctx);
+		const provider = activeProvider;
+		const token = lifecycleToken;
+
+		if (supportsUsageWidget(provider)) {
+			await refreshUsage(ctx, provider);
+			if (!isCurrent(token, provider)) return;
+			if (getCachedUsage(provider)) showWidget(ctx, provider);
+			else hideWidget(ctx);
 		}
 	});
 
 	pi.on("model_select", async (event, ctx) => {
-		activeProvider = event.model.provider;
-		if (supportsUsageWidget(activeProvider)) {
-			if (getCachedUsage(activeProvider)) showWidget(ctx);
-			await refreshUsage(ctx);
-			if (getCachedUsage(activeProvider)) showWidget(ctx);
+		const provider = event.model.provider;
+		const token = lifecycleToken;
+		activeProvider = provider;
+
+		if (supportsUsageWidget(provider)) {
+			if (getCachedUsage(provider)) showWidget(ctx, provider);
+			await refreshUsage(ctx, provider);
+			if (!isCurrent(token, provider)) return;
+			if (getCachedUsage(provider)) showWidget(ctx, provider);
 			else hideWidget(ctx);
 		} else {
 			hideWidget(ctx);
