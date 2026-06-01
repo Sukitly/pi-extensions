@@ -12,6 +12,7 @@ A small collection of extensions for [pi-coding-agent](https://github.com/badlog
 | `replace-pi-with-claude-code.ts` | Rewrites `pi` to `claude code` in the system prompt | Auto-runs before each agent start | None |
 | `read-url.ts` | Adds a `read_url` tool that reads public URLs as Markdown through Jina Reader | Agent calls `read_url` when it needs external docs | Optional `JINA_API_KEY` for authenticated Jina quota |
 | `usage-widget.ts` | Shows Anthropic or Codex usage bars for the active provider | Auto-runs on session start, model change, and after agent turns | Valid Anthropic OAuth or OpenAI Codex auth |
+| `fix-anthropic-thinking-block-drop.ts` | Reinjects signed thinking blocks that pi-ai drops, avoiding Anthropic `400` errors on Opus/Sonnet 4.8 | Auto-runs before each Anthropic provider request | Anthropic model with thinking enabled |
 
 ## Installation
 
@@ -24,6 +25,7 @@ cp docs-changes.ts ~/.pi/agent/extensions/
 cp replace-pi-with-claude-code.ts ~/.pi/agent/extensions/
 cp read-url.ts ~/.pi/agent/extensions/
 cp usage-widget.ts ~/.pi/agent/extensions/
+cp fix-anthropic-thinking-block-drop.ts ~/.pi/agent/extensions/
 ```
 
 Then reload pi:
@@ -234,6 +236,29 @@ Use it when:
 
 ![usage-widget screenshot](assets/screenshot.png)
 
+### `fix-anthropic-thinking-block-drop.ts`
+
+Workaround for an Anthropic `400` error seen on Opus/Sonnet 4.8:
+
+> `thinking or redacted_thinking blocks in the latest assistant message cannot be modified`
+
+The root cause is in pi-ai: when building the Anthropic payload it drops any thinking block whose visible text is empty, even when the block is signed. With adaptive (`summarized`) thinking the model often emits signed thinking blocks with an empty summary, and Opus/Sonnet 4.8 rejects the replay when one is missing.
+
+Behavior:
+
+- Hooks `before_provider_request` and only acts on the `anthropic-messages` API
+- Aligns each assistant message in the outgoing payload with the original session message from the tail
+- Reinjects any signed, empty-text thinking block that pi-ai dropped, at its correct position
+- Repairs same-model turns only; cross-model thinking drops are intentional and left untouched
+- Bails out without modifying the payload if its model of pi-ai's transform diverges from the actual payload
+- Sets a status line reporting how many blocks were reinjected
+
+Use it when:
+
+- you run Anthropic Opus/Sonnet 4.8 with adaptive (`summarized`) thinking
+- you hit `thinking ... blocks in the latest assistant message cannot be modified` 400 errors
+- you want a stopgap until upstream pi-ai keeps signed thinking blocks regardless of text emptiness
+
 ## Notes
 
 | Extension | Notes |
@@ -244,6 +269,7 @@ Use it when:
 | `replace-pi-with-claude-code.ts` | Only affects prompt text, not UI labels or command names. |
 | `read-url.ts` | Reads public URLs through Jina Reader. Set `JINA_API_KEY` only if you want authenticated fallback after anonymous quota is exhausted. |
 | `usage-widget.ts` | Hidden when the active provider is unsupported or no usage data is available. |
+| `fix-anthropic-thinking-block-drop.ts` | Workaround for a pi-ai thinking-block drop bug. Acts only on the `anthropic-messages` API and same-model turns. Remove once pi-ai keeps signed empty-text thinking blocks. |
 
 ## License
 
