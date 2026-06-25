@@ -7,6 +7,12 @@ import { basename, dirname, join } from "node:path";
 
 const BACKUP_DIR = join(homedir(), ".pi", "agent", "auth-backups");
 const AUTH_FILE = join(homedir(), ".pi", "agent", "auth.json");
+// Pointer to the slot the live auth.json currently belongs to. pi rotates the
+// OAuth refresh token on every refresh and writes it to live auth.json, so a
+// slot is only safe to restore if it holds that account's *latest* (unused)
+// refresh token. We keep slots fresh by saving live back to its slot before
+// switching away — this pointer records which slot that is.
+const CURRENT_FILE = join(BACKUP_DIR, ".current");
 const MESSAGE_TYPE = "auth-backup";
 const NAME_RE = /^[a-zA-Z0-9._-]+$/;
 
@@ -322,6 +328,69 @@ async function deleteBackup(name: string): Promise<void> {
 	await rm(backupPath(name));
 }
 
+async function readCurrentSlot(): Promise<string | null> {
+	try {
+		const raw = (await readFile(CURRENT_FILE, "utf8")).trim();
+		return raw && isValidBackupName(raw) ? raw : null;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+		throw error;
+	}
+}
+
+async function writeCurrentSlot(name: string): Promise<void> {
+	await ensureBackupDir();
+	const tempPath = `${CURRENT_FILE}.tmp-${process.pid}-${Date.now()}`;
+	await writeFile(tempPath, `${name}\n`, { mode: 0o600 });
+	await rename(tempPath, CURRENT_FILE);
+}
+
+async function clearCurrentSlot(): Promise<void> {
+	await rm(CURRENT_FILE, { force: true });
+}
+
+async function liveHasCredentials(): Promise<boolean> {
+	return Object.keys(await readCurrentAuth()).length > 0;
+}
+
+/**
+ * Best-effort account-identity check between two auth blobs. Uses the codex JWT
+ * account id when both sides expose it; returns null when it can't tell (e.g.
+ * anthropic-only creds, no parseable id). Guards save-back from polluting a
+ * slot when the live account was changed out of band (manual `pi login`).
+ */
+function sameAccount(a: AuthFile, b: AuthFile): boolean | null {
+	const ta = getCodexToken(a);
+	const tb = getCodexToken(b);
+	if (ta && tb) {
+		const ia = extractCodexAccountId(ta);
+		const ib = extractCodexAccountId(tb);
+		if (ia && ib) return ia === ib;
+	}
+	return null;
+}
+
+/**
+ * Save the current live auth.json back into its slot, capturing the latest
+ * rotated OAuth tokens before they are overwritten. Skips (with a warning) when
+ * the live account no longer matches the slot's account.
+ */
+async function saveLiveBackToSlot(
+	name: string,
+	notify: (message: string, level: "info" | "warning") => void,
+): Promise<void> {
+	const live = await readCurrentAuth();
+	if (Object.keys(live).length === 0) return;
+	if (await backupExists(name)) {
+		if (sameAccount(live, await readBackup(name)) === false) {
+			notify(`Live account differs from "${name}"; not overwriting it`, "warning");
+			return;
+		}
+	}
+	await ensureBackupDir();
+	await writeJsonAtomic(backupPath(name), live);
+}
+
 function validateName(name: string | null): string {
 	if (!name) throw new Error("Auth backup name required");
 	if (!isValidBackupName(name)) {
@@ -342,9 +411,9 @@ function requireInteractive(ctx: { hasUI: boolean }): void {
 	if (!ctx.hasUI) throw new Error("This command requires interactive UI.");
 }
 
-function toSelectItem(backup: BackupInfo, usageSummary?: string): SelectItem {
+function toSelectItem(backup: BackupInfo, usageSummary?: string, isCurrent = false): SelectItem {
 	return {
-		label: backup.name,
+		label: isCurrent ? `${backup.name} (current)` : backup.name,
 		value: backup.name,
 		description: buildBackupDescription(backup, usageSummary),
 	};
@@ -440,9 +509,10 @@ async function selectBackupTarget(
 	},
 ): Promise<{ kind: "new" } | { kind: "existing"; name: string } | null> {
 	const backups = await listBackups();
+	const currentSlot = await readCurrentSlot();
 	const buildItems = (): SelectItem[] => [
 		{ label: "+ New auth backup", value: NEW_BACKUP_VALUE, description: "Create a new named auth backup from current auth.json" },
-		...backups.map((backup) => toSelectItem(backup, getFreshUsageSummary(backup.name))),
+		...backups.map((backup) => toSelectItem(backup, getFreshUsageSummary(backup.name), backup.name === currentSlot)),
 	];
 	const selected = await showSelectList(ctx, "Auth backups:", buildItems(), (updateItems) => {
 		for (const backup of backups) {
@@ -484,7 +554,11 @@ function getBackupConfirmMessage(info: BackupInfo): string {
 }
 
 export default function (pi: ExtensionAPI) {
-	pi.registerMessageRenderer(MESSAGE_TYPE, (message, _options, _theme) => new Text(message.content, 0, 0));
+	pi.registerMessageRenderer(MESSAGE_TYPE, (message, _options, _theme) =>
+		// This extension only sends string content (see sendOutput); narrow for the
+		// renderer signature, which now accepts structured content too.
+		new Text(typeof message.content === "string" ? message.content : "", 0, 0),
+	);
 
 	pi.registerCommand("auth-backup", {
 		description: "Manage auth backups",
@@ -498,6 +572,7 @@ export default function (pi: ExtensionAPI) {
 				if (target.kind === "new") {
 					const name = await promptForNewBackupName(ctx);
 					await backupAuth(name, false);
+					await writeCurrentSlot(name); // live now belongs to this slot
 					ctx.ui.notify(`Backed up auth: ${name}`, "info");
 					return;
 				}
@@ -513,15 +588,31 @@ export default function (pi: ExtensionAPI) {
 						const ok = await ctx.ui.confirm("Overwrite backup", getBackupConfirmMessage(backup));
 						if (!ok) continue;
 						await backupAuth(backup.name, true);
+						await writeCurrentSlot(backup.name); // live now belongs to this slot
 						ctx.ui.notify(`Backed up auth: ${backup.name}`, "info");
 						return;
 					}
 
 					if (action === ACTION_RESTORE) {
-						const ok = await ctx.ui.confirm("Restore backup", getBackupConfirmMessage(backup));
+						const current = await readCurrentSlot();
+						const switchingAway = current !== null && current !== backup.name;
+						const unlinkedLive = current === null && (await liveHasCredentials());
+						const confirmMessage = unlinkedLive
+							? `${getBackupConfirmMessage(backup)}\n⚠ current auth.json is not linked to any backup and will be lost (use "Backup current auth here" first to keep it)`
+							: switchingAway
+								? `${getBackupConfirmMessage(backup)}\ncurrent "${current}" will be saved before switching`
+								: getBackupConfirmMessage(backup);
+						const ok = await ctx.ui.confirm("Restore backup", confirmMessage);
 						if (!ok) continue;
 						await ctx.waitForIdle();
+						// Capture the active account's freshest (rotated) OAuth tokens into its
+						// slot BEFORE overwriting live — otherwise that slot keeps an already-
+						// rotated, now-invalid refresh token and can never be restored again.
+						if (switchingAway) {
+							await saveLiveBackToSlot(current, (m, l) => ctx.ui.notify(m, l));
+						}
 						await restoreBackup(backup.name);
+						await writeCurrentSlot(backup.name);
 						ctx.modelRegistry.authStorage.reload();
 						ctx.modelRegistry.refresh();
 						ctx.ui.notify(`Restored auth backup: ${backup.name}`, "info");
@@ -533,6 +624,7 @@ export default function (pi: ExtensionAPI) {
 						const ok = await ctx.ui.confirm("Delete backup", getBackupConfirmMessage(backup));
 						if (!ok) continue;
 						await deleteBackup(backup.name);
+						if ((await readCurrentSlot()) === backup.name) await clearCurrentSlot();
 						ctx.ui.notify(`Deleted auth backup: ${backup.name}`, "info");
 						return;
 					}
