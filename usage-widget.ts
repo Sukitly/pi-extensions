@@ -2,44 +2,67 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 
-interface UsageBucket {
+interface UsageWindow {
+	label: string;
+	utilization: number;
+	resetsAt: string | null;
+	windowSeconds: number;
+}
+
+interface UsageResponse {
+	windows: UsageWindow[];
+}
+
+interface AnthropicUsageBucket {
 	utilization: number;
 	resets_at: string | null;
 }
 
-interface UsageResponse {
-	five_hour: UsageBucket | null;
-	seven_day: UsageBucket | null;
-	seven_day_opus: UsageBucket | null;
+interface AnthropicUsageResponse {
+	five_hour: AnthropicUsageBucket | null;
+	seven_day: AnthropicUsageBucket | null;
+	seven_day_opus: AnthropicUsageBucket | null;
 }
 
 interface CodexWindow {
 	used_percent: number;
 	reset_at: number;
+	limit_window_seconds?: number;
+}
+
+interface CodexRateLimit {
+	primary_window?: CodexWindow | null;
+	secondary_window?: CodexWindow | null;
 }
 
 interface CodexUsageResponse {
-	rate_limit?: {
-		primary_window?: CodexWindow | null;
-		secondary_window?: CodexWindow | null;
-	} | null;
+	rate_limit?: CodexRateLimit | null;
 }
 
 function pad2(n: number): string {
 	return n.toString().padStart(2, "0");
 }
 
-function formatResetTime5h(resetsAt: string | null): string {
-	if (!resetsAt) return "";
-	const d = new Date(resetsAt);
-	return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+const HOUR_SECONDS = 60 * 60;
+const DAY_SECONDS = 24 * HOUR_SECONDS;
+const FIVE_HOURS_SECONDS = 5 * HOUR_SECONDS;
+const SEVEN_DAYS_SECONDS = 7 * DAY_SECONDS;
+
+function formatWindowDuration(seconds: number): string {
+	if (seconds >= DAY_SECONDS && seconds % DAY_SECONDS === 0) return `${seconds / DAY_SECONDS}d`;
+	if (seconds >= HOUR_SECONDS && seconds % HOUR_SECONDS === 0) return `${seconds / HOUR_SECONDS}h`;
+	if (seconds >= 60 && seconds % 60 === 0) return `${seconds / 60}m`;
+	return `${seconds}s`;
 }
 
-function formatResetTime7d(resetsAt: string | null): string {
+function formatResetTime(resetsAt: string | null, windowSeconds: number): string {
 	if (!resetsAt) return "";
 	const d = new Date(resetsAt);
+	if (!Number.isFinite(d.getTime())) return "";
+	const time = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+	if (windowSeconds < DAY_SECONDS) return time;
 	const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-	return `${days[d.getDay()]} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+	return `${days[d.getDay()]} ${time}`;
 }
 
 function renderBar(pct: number, barWidth: number): string {
@@ -48,15 +71,15 @@ function renderBar(pct: number, barWidth: number): string {
 	return `[${"█".repeat(filled)}${"░".repeat(empty)}]`;
 }
 
-const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
-
-function computePaceDiff(bucket: UsageBucket): { diff: number; ahead: boolean } | null {
-	if (!bucket.resets_at) return null;
-	const resetMs = new Date(bucket.resets_at).getTime();
-	const windowStartMs = resetMs - SEVEN_DAYS_MS;
+function computePaceDiff(window: UsageWindow): { diff: number; ahead: boolean } | null {
+	if (!window.resetsAt) return null;
+	const resetMs = new Date(window.resetsAt).getTime();
+	if (!Number.isFinite(resetMs)) return null;
+	const windowMs = window.windowSeconds * 1000;
+	const windowStartMs = resetMs - windowMs;
 	const elapsed = Date.now() - windowStartMs;
-	const expectedPct = Math.min(100, Math.max(0, (elapsed / SEVEN_DAYS_MS) * 100));
-	const diff = bucket.utilization - expectedPct;
+	const expectedPct = Math.min(100, Math.max(0, (elapsed / windowMs) * 100));
+	const diff = window.utilization - expectedPct;
 	return { diff, ahead: diff > 0 };
 }
 
@@ -68,27 +91,22 @@ function formatPaceDiff(pace: { diff: number; ahead: boolean }, theme: Theme): s
 	return theme.fg("success", `▼${label}`);
 }
 
+function renderUsageWindow(window: UsageWindow, theme: Theme): string {
+	const resetTime = formatResetTime(window.resetsAt, window.windowSeconds);
+	const bar = renderBar(window.utilization, 10);
+	const pace = window.windowSeconds >= DAY_SECONDS ? computePaceDiff(window) : null;
+	const paceStr = pace ? ` ${formatPaceDiff(pace, theme)}` : "";
+	return (
+		theme.fg(
+			"dim",
+			`${window.label}: ${bar} ${window.utilization.toFixed(0)}%${resetTime ? ` ~ ${resetTime}` : ""}`,
+		) + paceStr
+	);
+}
+
 function buildWidgetLine(data: UsageResponse, theme: Theme): string {
-	const parts: string[] = [];
-
-	if (data.five_hour) {
-		const pct = data.five_hour.utilization;
-		const resetTime = formatResetTime5h(data.five_hour.resets_at);
-		const bar = renderBar(pct, 10);
-		parts.push(theme.fg("dim", `5h: ${bar} ${pct.toFixed(0)}%${resetTime ? ` ~ ${resetTime}` : ""}`));
-	}
-
-	if (data.seven_day) {
-		const pct = data.seven_day.utilization;
-		const resetTime = formatResetTime7d(data.seven_day.resets_at);
-		const bar = renderBar(pct, 10);
-		const pace = computePaceDiff(data.seven_day);
-		const paceStr = pace ? ` ${formatPaceDiff(pace, theme)}` : "";
-		parts.push(theme.fg("dim", `7d: ${bar} ${pct.toFixed(0)}%${resetTime ? ` ~ ${resetTime}` : ""}`) + paceStr);
-	}
-
-	if (parts.length === 0) return theme.fg("dim", "No usage data");
-	return parts.join(theme.fg("dim", "  ·  "));
+	if (data.windows.length === 0) return theme.fg("dim", "No usage data");
+	return data.windows.map((window) => renderUsageWindow(window, theme)).join(theme.fg("dim", "  ·  "));
 }
 
 function unixSecondsToIso(timestamp: number | null | undefined): string | null {
@@ -114,22 +132,59 @@ function extractCodexAccountId(token: string): string | null {
 	return typeof accountId === "string" && accountId.length > 0 ? accountId : null;
 }
 
-function normalizeCodexUsage(data: CodexUsageResponse): UsageResponse {
+function normalizeAnthropicUsage(data: AnthropicUsageResponse): UsageResponse {
+	const windows: UsageWindow[] = [];
+	if (data.five_hour) {
+		windows.push({
+			label: "5h",
+			utilization: data.five_hour.utilization,
+			resetsAt: data.five_hour.resets_at,
+			windowSeconds: FIVE_HOURS_SECONDS,
+		});
+	}
+	if (data.seven_day) {
+		windows.push({
+			label: "7d",
+			utilization: data.seven_day.utilization,
+			resetsAt: data.seven_day.resets_at,
+			windowSeconds: SEVEN_DAYS_SECONDS,
+		});
+	}
+	return { windows };
+}
+
+function normalizeCodexWindow(
+	window: CodexWindow | null | undefined,
+	fallbackWindowSeconds: number,
+): UsageWindow | null {
+	if (!window || !Number.isFinite(window.used_percent)) return null;
+	const windowSeconds =
+		typeof window.limit_window_seconds === "number" &&
+		Number.isFinite(window.limit_window_seconds) &&
+		window.limit_window_seconds > 0
+			? window.limit_window_seconds
+			: fallbackWindowSeconds;
+	const durationLabel = formatWindowDuration(windowSeconds);
 	return {
-		five_hour: data.rate_limit?.primary_window
-			? {
-				utilization: data.rate_limit.primary_window.used_percent,
-				resets_at: unixSecondsToIso(data.rate_limit.primary_window.reset_at),
-			}
-			: null,
-		seven_day: data.rate_limit?.secondary_window
-			? {
-				utilization: data.rate_limit.secondary_window.used_percent,
-				resets_at: unixSecondsToIso(data.rate_limit.secondary_window.reset_at),
-			}
-			: null,
-		seven_day_opus: null,
+		label: durationLabel,
+		utilization: window.used_percent,
+		resetsAt: unixSecondsToIso(window.reset_at),
+		windowSeconds,
 	};
+}
+
+function appendCodexRateLimit(windows: UsageWindow[], rateLimit: CodexRateLimit | null | undefined) {
+	if (!rateLimit) return;
+	const primary = normalizeCodexWindow(rateLimit.primary_window, FIVE_HOURS_SECONDS);
+	const secondary = normalizeCodexWindow(rateLimit.secondary_window, SEVEN_DAYS_SECONDS);
+	if (primary) windows.push(primary);
+	if (secondary) windows.push(secondary);
+}
+
+function normalizeCodexUsage(data: CodexUsageResponse): UsageResponse {
+	const windows: UsageWindow[] = [];
+	appendCodexRateLimit(windows, data.rate_limit);
+	return { windows };
 }
 
 async function fetchAnthropicUsage(apiKey: string): Promise<UsageResponse | null> {
@@ -145,7 +200,7 @@ async function fetchAnthropicUsage(apiKey: string): Promise<UsageResponse | null
 			signal: AbortSignal.timeout(10000),
 		});
 		if (!response.ok) return null;
-		return (await response.json()) as UsageResponse;
+		return normalizeAnthropicUsage((await response.json()) as AnthropicUsageResponse);
 	} catch {
 		return null;
 	}
