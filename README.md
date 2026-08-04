@@ -10,7 +10,7 @@ A small collection of extensions for [pi-coding-agent](https://github.com/badlog
 | `branch-pr-widget.ts` | Shows the GitHub PR for the current branch | Auto-runs on session start and after agent turns | `gh` installed, current repo branch associated with a PR |
 | `docs-changes.ts` | Shows changed files under `docs/` as a widget | Auto-runs on session start and after agent turns | Git repo with a `docs/` directory |
 | `export-dialogue.ts` | Exports the current branch to a dated, LLM-titled JSONL file | Run `/xp` | Active model credentials; optional `PI_XP_PATH` |
-| `replace-pi-with-claude-code.ts` | Rewrites `pi` to `claude code` in the system prompt | Auto-runs before each agent start | None |
+| `replace-pi-with-claude-code.ts` | Rewrites `pi` to `claude code` in the system prompt | Auto-runs before each agent start and before each provider request | None |
 | `read-url.ts` | Adds a `read_url` tool that reads public URLs as Markdown through Jina Reader | Agent calls `read_url` when it needs external docs | Optional `JINA_API_KEY` for authenticated Jina quota |
 | `usage-widget.ts` | Shows Anthropic or Codex usage bars for the active provider | Auto-runs on session start, model change, and after agent turns | Valid Anthropic OAuth or OpenAI Codex auth |
 | `fix-anthropic-thinking-block-drop.ts` | Reinjects signed thinking blocks that pi-ai drops, avoiding Anthropic `400` errors on Opus/Sonnet 4.8 | Auto-runs before each Anthropic provider request | Anthropic model with thinking enabled |
@@ -147,13 +147,16 @@ Rewrites occurrences of `pi` in the system prompt to `claude code` before each r
 
 Behavior:
 
-- Hooks `before_agent_start`
+- Hooks `before_agent_start` for turns started by typed input or `sendUserMessage`
+- Hooks `before_provider_request` and rewrites the serialized `system` blocks, covering turns triggered by extension custom messages (`pi.sendMessage` with `triggerTurn`), which never fire `before_agent_start`
 - Replaces ` pi` case-insensitively with ` claude code`
-- Only changes the system prompt when a replacement is needed
+- Preserves `cache_control` and other block fields; leaves message content and non-Anthropic payload shapes untouched
+- Idempotent: an already-rewritten prompt passes through unchanged
 
 Use it when:
 
 - you want the agent framed as Claude Code instead of pi
+- you use Anthropic subscription OAuth, whose billing classifier rejects requests that do not look like Claude Code with 400 "You're out of extra usage" even when quota remains
 
 ### `read-url.ts`
 
@@ -295,7 +298,7 @@ Use it when:
 | `branch-pr-widget.ts` | Hidden when no PR is associated with the current branch or `gh` is unavailable. |
 | `docs-changes.ts` | Hidden when there is no `docs/` directory or no matching changes. |
 | `export-dialogue.ts` | `/xp` makes a separate title-generation request with the active model. The request is not persisted in the exported session. |
-| `replace-pi-with-claude-code.ts` | Only affects prompt text, not UI labels or command names. |
+| `replace-pi-with-claude-code.ts` | Only affects system prompt text (agent state and serialized provider payload), not UI labels, command names, or message content. |
 | `read-url.ts` | Reads public URLs through Jina Reader. Set `JINA_API_KEY` only if you want authenticated fallback after anonymous quota is exhausted. |
 | `usage-widget.ts` | Hidden when the active provider is unsupported or no usage data is available. |
 | `fix-anthropic-thinking-block-drop.ts` | Workaround for a pi-ai thinking-block drop bug. Acts only on the `anthropic-messages` API and same-model turns. Remove once pi-ai keeps signed empty-text thinking blocks. |
