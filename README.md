@@ -131,6 +131,10 @@ is an ambient yes/no, and four digits in a footer become something you parse ins
 It appears for unstaged edits, staged edits, and untracked files, and can show on its own when
 edits happen to net out to zero lines.
 
+It renders in `dim`, matching the usage bars rather than standing out. An unclean tree is an
+ordinary resting state, not a condition to flag, so the marker deliberately sits below the
+counts in the visual hierarchy instead of competing with them.
+
 The counts always mean one thing: **everything you have that the integration branch does not.**
 There is no per-branch special case, so the number never silently changes meaning as you switch
 branches. On a feature branch it keeps growing as you commit, staying a live estimate of the

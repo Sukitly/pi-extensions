@@ -173,7 +173,11 @@ function renderStats(stats: DiffStats, theme: Theme): string {
 	const parts: string[] = [];
 	if (stats.added > 0) parts.push(theme.fg("success", `+${stats.added}`));
 	if (stats.deleted > 0) parts.push(theme.fg("error", `-${stats.deleted}`));
-	if (stats.dirty) parts.push(theme.fg("warning", DIRTY_MARKER));
+	// `dim` rather than `warning`: an unclean tree is an ordinary resting state, not a
+	// condition to flag. In the default dark theme `warning` is pure #ffff00, the
+	// brightest entry in the palette and twice the luminance of the `success` green
+	// rendering the counts, so it drew more attention than the figures it qualifies.
+	if (stats.dirty) parts.push(theme.fg("dim", DIRTY_MARKER));
 	return parts.length > 0 ? ` ${parts.join(" ")}` : "";
 }
 
