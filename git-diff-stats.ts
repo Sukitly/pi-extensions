@@ -36,10 +36,18 @@ interface DiffStats {
  * needs a figure, while "is anything uncommitted" is an ambient yes/no. Four
  * digits in a footer become something you parse instead of absorb.
  *
- * Uses the editor "unsaved buffer" dot rather than the shell-prompt asterisk,
- * which sits above the baseline and reads as a footnote against `+125`.
+ * U+2981 Z NOTATION SPOT, chosen by eye against the alternatives at the terminal.
+ *
+ * Glyph class drives the vertical placement here. U+25CF BLACK CIRCLE is a Geometric
+ * Shape, centred on the em box, which sits below the optical centre of lowercase text
+ * and looks bottom-aligned inline. U+2022 BULLET is General Punctuation and aligns
+ * correctly but is too small to register once dimmed. U+2981 is a Mathematical
+ * Operator, so it rides the same axis as the `+` and `-` in the counts beside it,
+ * while carrying more weight than the bullet. The shell-prompt asterisk was rejected
+ * for the opposite reason to U+25CF: it rides above the baseline and reads as a
+ * footnote.
  */
-const DIRTY_MARKER = "●";
+const DIRTY_MARKER = "⦁";
 
 const EXEC_TIMEOUT_MS = 5000;
 const REFRESH_THROTTLE_MS = 1500;
@@ -173,7 +181,11 @@ function renderStats(stats: DiffStats, theme: Theme): string {
 	const parts: string[] = [];
 	if (stats.added > 0) parts.push(theme.fg("success", `+${stats.added}`));
 	if (stats.deleted > 0) parts.push(theme.fg("error", `-${stats.deleted}`));
-	if (stats.dirty) parts.push(theme.fg("warning", DIRTY_MARKER));
+	// `dim` rather than `warning`: an unclean tree is an ordinary resting state, not a
+	// condition to flag. In the default dark theme `warning` is pure #ffff00, the
+	// brightest entry in the palette and twice the luminance of the `success` green
+	// rendering the counts, so it drew more attention than the figures it qualifies.
+	if (stats.dirty) parts.push(theme.fg("dim", DIRTY_MARKER));
 	return parts.length > 0 ? ` ${parts.join(" ")}` : "";
 }
 
