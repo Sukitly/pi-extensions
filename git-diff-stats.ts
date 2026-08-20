@@ -2,7 +2,12 @@
  * Git Diff Stats - shows +added / -deleted line counts right after the branch
  * name on the footer's cwd line:
  *
- *   ~/.pi/agent/extensions (main) +42 -7
+ *   ~/.pi/agent/extensions (feature-x) +42 -7
+ *
+ * The counts always mean the same thing: everything you have that the integration
+ * branch does not. That is branch commits plus staged, unstaged, and untracked work,
+ * measured from the merge base, so the number keeps growing as you commit and stays
+ * a live estimate of the eventual PR size.
  *
  * The cwd line belongs to pi's built-in footer, and `setFooter` replaces the
  * footer wholesale. Rather than reimplementing it, this extension instantiates
@@ -21,7 +26,20 @@ import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 interface DiffStats {
 	added: number;
 	deleted: number;
+	/** Some of the counted work is not committed yet. */
+	dirty: boolean;
 }
+
+/**
+ * Marks an unclean working tree. Deliberately a state flag rather than a second
+ * pair of numbers: "how big is my PR" is an occasional deliberate lookup that
+ * needs a figure, while "is anything uncommitted" is an ambient yes/no. Four
+ * digits in a footer become something you parse instead of absorb.
+ *
+ * Uses the editor "unsaved buffer" dot rather than the shell-prompt asterisk,
+ * which sits above the baseline and reads as a footnote against `+125`.
+ */
+const DIRTY_MARKER = "●";
 
 const EXEC_TIMEOUT_MS = 5000;
 const REFRESH_THROTTLE_MS = 1500;
@@ -31,6 +49,50 @@ const MUTATING_TOOLS = new Set(["bash", "edit", "write", "multi_edit", "apply_pa
 
 /** Count untracked files as additions so new files are not invisible. */
 const INCLUDE_UNTRACKED = true;
+
+/** Probed in order when `origin/HEAD` is not configured locally. */
+const BASE_REF_CANDIDATES = ["origin/main", "origin/master", "main", "master"];
+
+async function git(pi: ExtensionAPI, cwd: string, args: string[]): Promise<string | null> {
+	const result = await pi.exec("git", args, { cwd, timeout: EXEC_TIMEOUT_MS });
+	if (result.code !== 0) return null;
+	const out = result.stdout.trim();
+	return out.length > 0 ? out : null;
+}
+
+/**
+ * Integration branch to measure against, e.g. "origin/main". Prefers the remote's
+ * advertised default branch so repos using `develop` or `trunk` work unchanged, and
+ * prefers remote refs because a local `main` is often stale.
+ */
+async function resolveBaseRef(pi: ExtensionAPI, cwd: string): Promise<string | null> {
+	const advertised = await git(pi, cwd, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]);
+	if (advertised) return advertised;
+	for (const ref of BASE_REF_CANDIDATES) {
+		if (await git(pi, cwd, ["rev-parse", "--verify", "--quiet", ref])) return ref;
+	}
+	return null;
+}
+
+/**
+ * Commit to diff the working tree against: always the merge base with the
+ * integration branch.
+ *
+ * Deliberately not special-cased per branch. One rule holds everywhere — "everything
+ * you have that the integration branch does not" — so the number never silently
+ * changes meaning as you switch branches. On a feature branch it covers branch
+ * commits plus staged, unstaged, and untracked work. On the integration branch the
+ * merge base collapses to `HEAD` as soon as your commits are pushed, so it reduces
+ * to uncommitted-only, while still surfacing commits you have not pushed yet.
+ *
+ * Note this is the merge base, not the base branch tip: diffing the tip would fold
+ * commits that landed upstream after your fork point into your count as deletions.
+ */
+async function resolveDiffBase(pi: ExtensionAPI, cwd: string, baseRef: string | null): Promise<string> {
+	if (!baseRef) return "HEAD";
+	// Fails on unrelated histories or a shallow clone that lacks the fork point.
+	return (await git(pi, cwd, ["merge-base", baseRef, "HEAD"])) ?? "HEAD";
+}
 
 function countLines(path: string): number {
 	try {
@@ -46,15 +108,16 @@ function countLines(path: string): number {
 	}
 }
 
-async function readTrackedStats(pi: ExtensionAPI, cwd: string): Promise<DiffStats | null> {
-	// `HEAD` covers staged + unstaged; falls back to the index on a repo with no commits.
+async function readTrackedStats(pi: ExtensionAPI, cwd: string, base: string): Promise<DiffStats | null> {
+	// A single commit argument diffs it against the working tree, so staged and
+	// unstaged edits are included. Falls back to the index on a repo with no commits.
 	for (const args of [
-		["diff", "--numstat", "HEAD", "--"],
+		["diff", "--numstat", base, "--"],
 		["diff", "--numstat", "--cached", "--"],
 	]) {
 		const result = await pi.exec("git", args, { cwd, timeout: EXEC_TIMEOUT_MS });
 		if (result.code !== 0) continue;
-		const stats: DiffStats = { added: 0, deleted: 0 };
+		const stats: DiffStats = { added: 0, deleted: 0, dirty: false };
 		for (const line of result.stdout.split("\n")) {
 			const [added, deleted] = line.split("\t");
 			if (added === undefined || deleted === undefined) continue;
@@ -74,15 +137,33 @@ async function addUntrackedStats(pi: ExtensionAPI, cwd: string, stats: DiffStats
 	});
 	if (result.code !== 0) return;
 	const files = result.stdout.split("\n").filter(Boolean).slice(0, MAX_UNTRACKED_FILES);
+	if (files.length > 0) stats.dirty = true;
 	for (const file of files) stats.added += countLines(join(cwd, file));
 }
 
-async function readDiffStats(pi: ExtensionAPI, cwd: string): Promise<DiffStats | null> {
+/**
+ * Whether tracked files differ from `HEAD`. `--quiet` exits 1 on a difference and
+ * writes nothing, so this stays cheap regardless of how large the diff is.
+ */
+async function hasUncommittedTrackedChanges(pi: ExtensionAPI, cwd: string): Promise<boolean> {
+	const head = await pi.exec("git", ["diff", "--quiet", "HEAD", "--"], { cwd, timeout: EXEC_TIMEOUT_MS });
+	if (head.code === 0) return false;
+	if (head.code === 1) return true;
+	// Higher codes mean git errored rather than reported a difference, typically
+	// because HEAD does not exist yet. Anything staged in that state is uncommitted.
+	const cached = await pi.exec("git", ["diff", "--quiet", "--cached", "--"], { cwd, timeout: EXEC_TIMEOUT_MS });
+	return cached.code === 1;
+}
+
+async function readDiffStats(pi: ExtensionAPI, cwd: string, baseRef: string | null): Promise<DiffStats | null> {
 	try {
-		const stats = await readTrackedStats(pi, cwd);
+		const base = await resolveDiffBase(pi, cwd, baseRef);
+		const stats = await readTrackedStats(pi, cwd, base);
 		if (!stats) return null;
+		stats.dirty = await hasUncommittedTrackedChanges(pi, cwd);
 		if (INCLUDE_UNTRACKED) await addUntrackedStats(pi, cwd, stats);
-		return stats.added === 0 && stats.deleted === 0 ? null : stats;
+		// A dirty tree still reports, even when edits happen to net out to zero lines.
+		return stats.added === 0 && stats.deleted === 0 && !stats.dirty ? null : stats;
 	} catch {
 		return null;
 	}
@@ -92,6 +173,7 @@ function renderStats(stats: DiffStats, theme: Theme): string {
 	const parts: string[] = [];
 	if (stats.added > 0) parts.push(theme.fg("success", `+${stats.added}`));
 	if (stats.deleted > 0) parts.push(theme.fg("error", `-${stats.deleted}`));
+	if (stats.dirty) parts.push(theme.fg("warning", DIRTY_MARKER));
 	return parts.length > 0 ? ` ${parts.join(" ")}` : "";
 }
 
@@ -128,15 +210,28 @@ export default function (pi: ExtensionAPI) {
 	let tui: TUI | null = null;
 	let lastRefreshAt = 0;
 	let refreshing = false;
+	// The integration branch effectively never changes within a session, so it is
+	// resolved once per cwd instead of on every refresh. `undefined` means unresolved,
+	// `null` means resolved to "no base branch here".
+	const baseRefByCwd = new Map<string, string | null>();
+
+	async function getBaseRef(cwd: string): Promise<string | null> {
+		const cached = baseRefByCwd.get(cwd);
+		if (cached !== undefined) return cached;
+		const resolved = await resolveBaseRef(pi, cwd);
+		baseRefByCwd.set(cwd, resolved);
+		return resolved;
+	}
 
 	async function refresh(ctx: ExtensionContext, force = false) {
 		if (refreshing) return;
 		if (!force && Date.now() - lastRefreshAt < REFRESH_THROTTLE_MS) return;
 		refreshing = true;
 		try {
-			const next = await readDiffStats(pi, ctx.cwd);
+			const next = await readDiffStats(pi, ctx.cwd, await getBaseRef(ctx.cwd));
 			lastRefreshAt = Date.now();
-			const changed = next?.added !== stats?.added || next?.deleted !== stats?.deleted;
+			const changed =
+				next?.added !== stats?.added || next?.deleted !== stats?.deleted || next?.dirty !== stats?.dirty;
 			stats = next;
 			if (changed) tui?.requestRender();
 		} finally {
@@ -178,6 +273,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
+		baseRefByCwd.clear();
 		installFooter(ctx);
 		await refresh(ctx, true);
 	});

@@ -10,7 +10,7 @@ A small collection of extensions for [pi-coding-agent](https://github.com/badlog
 | `branch-pr-widget.ts` | Shows the GitHub PR for the current branch | Auto-runs on session start and after agent turns | `gh` installed, current repo branch associated with a PR |
 | `docs-changes.ts` | Shows changed files under `docs/` as a widget | Auto-runs on session start and after agent turns | Git repo with a `docs/` directory |
 | `export-dialogue.ts` | Exports the current branch to a dated, LLM-titled JSONL file | Run `/xp` | Active model credentials; optional `PI_XP_PATH` |
-| `git-diff-stats.ts` | Appends `+added -deleted` line counts after the branch name on the footer's cwd line | Auto-runs on session start, after agent turns, and after mutating tools | Git repo; TUI mode |
+| `git-diff-stats.ts` | Appends whole-branch `+added -deleted` line counts, plus an uncommitted marker, after the branch name on the footer's cwd line | Auto-runs on session start, after agent turns, and after mutating tools | Git repo; TUI mode |
 | `replace-pi-with-claude-code.ts` | Rewrites `pi` to `claude code` in the system prompt | Auto-runs before each agent start and before each provider request | None |
 | `read-url.ts` | Adds a `read_url` tool that reads public URLs as Markdown through Jina Reader | Agent calls `read_url` when it needs external docs | Optional `JINA_API_KEY` for authenticated Jina quota |
 | `usage-widget.ts` | Shows Anthropic or Codex usage bars for the active provider | Auto-runs on session start, model change, and after agent turns | Valid Anthropic OAuth or OpenAI Codex auth |
@@ -117,23 +117,62 @@ Use it when:
 
 ### `git-diff-stats.ts`
 
-Shows how much the working tree diverges from `HEAD`, inline on the footer's cwd line:
+Shows how much the current branch diverges from the integration branch, inline on the footer's
+cwd line:
 
 ```text
-~/.pi/agent/extensions (main) +42 -7
+~/.pi/agent/extensions (feature-x) +42 -7 ●
 ```
+
+The trailing `●` means part of that work is not committed yet, the same idiom editors use for an
+unsaved buffer. It is a state flag rather than a second pair of numbers on purpose: "how big is
+my PR" is an occasional deliberate lookup that needs a figure, while "is anything uncommitted"
+is an ambient yes/no, and four digits in a footer become something you parse instead of absorb.
+It appears for unstaged edits, staged edits, and untracked files, and can show on its own when
+edits happen to net out to zero lines.
+
+The counts always mean one thing: **everything you have that the integration branch does not.**
+There is no per-branch special case, so the number never silently changes meaning as you switch
+branches. On a feature branch it keeps growing as you commit, staying a live estimate of the
+eventual PR size.
+
+| Where you are | What shows up |
+|---|---|
+| Feature branch | Branch commits + staged + unstaged + untracked |
+| Integration branch, work pushed | Staged + unstaged + untracked |
+| Integration branch, local commits not pushed | Those commits + staged + unstaged + untracked |
+
+The last row falls out of the same rule rather than being special-cased, which is why unpushed
+work on `main` is visible instead of silently reading as zero.
 
 That line is rendered by pi's built-in footer, and `ctx.ui.setFooter()` replaces the footer
 wholesale. Instead of reimplementing it, the extension constructs the built-in `FooterComponent`
 over a small `ExtensionContext` adapter and rewrites only line 0 of its output, so the
 stats/model line keeps upstream behavior.
 
+Base branch resolution:
+
+- Reads the remote's advertised default branch via `git symbolic-ref refs/remotes/origin/HEAD`,
+  so repos on `develop` or `trunk` work without configuration
+- Falls back to probing `origin/main`, `origin/master`, `main`, `master` in that order,
+  preferring remote refs because a local `main` is often stale
+- Never fetches. Resolution is local-only, so the footer never blocks on the network
+
 Behavior:
 
-- Sums `git diff --numstat HEAD` (staged + unstaged), falling back to `--cached` on a repo with no commits
+- Diffs against `git merge-base <base> HEAD`, not the base branch tip. Diffing the tip would
+  fold commits that landed on the base branch after the fork point into your count as deletions
+- Passing a single commit to `git diff` compares it against the working tree, so branch commits
+  and uncommitted edits are counted in one call
+- On the integration branch the merge base collapses to `HEAD` once your commits are pushed, so
+  the general rule degrades to uncommitted-only without needing a branch check
+- Falls back to `HEAD` on unrelated histories, on shallow clones missing the fork point, and when
+  no base branch exists; then to `--cached` on a repo with no commits
 - Adds untracked file line counts from `git ls-files --others --exclude-standard` (set `INCLUDE_UNTRACKED = false` to skip)
 - Skips binary and oversized untracked files, and caps the untracked scan at 200 files
 - Omits a side entirely when it is zero, so a clean-of-deletions tree shows `+42`, not `+42 -0`
+- Detects an unclean tree with `git diff --quiet`, which writes nothing and exits 1 on a
+  difference, so the check stays cheap no matter how large the diff is
 - Refreshes on:
   - `session_start`
   - `agent_end`
@@ -142,7 +181,8 @@ Behavior:
 
 Use it when:
 
-- you want uncommitted churn visible without running `git diff --stat`
+- you commit repeatedly on a branch and want a running total of the eventual PR size
+- you want churn visible without running `git diff --stat`
 - you review agent-made edits before committing
 
 ### `export-dialogue.ts`
@@ -328,7 +368,7 @@ Use it when:
 | `branch-pr-widget.ts` | Hidden when no PR is associated with the current branch or `gh` is unavailable. |
 | `docs-changes.ts` | Hidden when there is no `docs/` directory or no matching changes. |
 | `export-dialogue.ts` | `/xp` makes a separate title-generation request with the active model. The request is not persisted in the exported session. |
-| `git-diff-stats.ts` | Replaces the footer, so it conflicts with any other `setFooter` extension (last one to run wins). It reuses the built-in `FooterComponent`, but cannot read the auto-compaction flag, so the stats line always shows `(auto)`. Shows nothing outside a git repo or when the tree matches `HEAD`. |
+| `git-diff-stats.ts` | Replaces the footer, so it conflicts with any other `setFooter` extension (last one to run wins). It reuses the built-in `FooterComponent`, but cannot read the auto-compaction flag, so the stats line always shows `(auto)`. The base branch is resolved from local refs only; after a long gap without fetching, a branch rebased onto newer upstream commits can report a stale merge base. Shows nothing outside a git repo or when the branch has no net change. |
 | `replace-pi-with-claude-code.ts` | Only affects system prompt text (agent state and serialized provider payload), not UI labels, command names, or message content. |
 | `read-url.ts` | Reads public URLs through Jina Reader. Set `JINA_API_KEY` only if you want authenticated fallback after anonymous quota is exhausted. |
 | `usage-widget.ts` | Hidden when the active provider is unsupported or no usage data is available. |
