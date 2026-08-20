@@ -121,10 +121,10 @@ Shows how much the current branch diverges from the integration branch, inline o
 cwd line:
 
 ```text
-~/.pi/agent/extensions (feature-x) +42 -7 •
+~/.pi/agent/extensions (feature-x) +42 -7 ⦁
 ```
 
-The trailing `•` means part of that work is not committed yet, the same idiom editors use for an
+The trailing `⦁` means part of that work is not committed yet, the same idiom editors use for an
 unsaved buffer. It is a state flag rather than a second pair of numbers on purpose: "how big is
 my PR" is an occasional deliberate lookup that needs a figure, while "is anything uncommitted"
 is an ambient yes/no, and four digits in a footer become something you parse instead of absorb.
@@ -135,10 +135,12 @@ It renders in `dim`, matching the usage bars rather than standing out. An unclea
 ordinary resting state, not a condition to flag, so the marker deliberately sits below the
 counts in the visual hierarchy instead of competing with them.
 
-The glyph is U+2022 BULLET, not the visually similar U+25CF BLACK CIRCLE. U+25CF belongs to
-Geometric Shapes and is centred on the em box, which sits below the optical centre of lowercase
-text and reads as bottom-aligned inline. U+2022 is General Punctuation, sharing the optical
-centre of the U+00B7 separators used elsewhere in the footer.
+The glyph is U+2981 Z NOTATION SPOT. Glyph class drives vertical placement: U+25CF BLACK CIRCLE
+is a Geometric Shape centred on the em box, which sits below the optical centre of lowercase text
+and reads as bottom-aligned inline, while U+2022 BULLET aligns correctly but is too small to
+register once dimmed. U+2981 is a Mathematical Operator, so it rides the same axis as the `+` and
+`-` beside it while carrying more weight than a bullet. It reports width 1 under pi-tui, so footer
+truncation math is unaffected.
 
 The counts always mean one thing: **everything you have that the integration branch does not.**
 There is no per-branch special case, so the number never silently changes meaning as you switch
