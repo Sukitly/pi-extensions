@@ -36,10 +36,14 @@ interface DiffStats {
  * needs a figure, while "is anything uncommitted" is an ambient yes/no. Four
  * digits in a footer become something you parse instead of absorb.
  *
- * Uses the editor "unsaved buffer" dot rather than the shell-prompt asterisk,
- * which sits above the baseline and reads as a footnote against `+125`.
+ * U+2022 BULLET rather than U+25CF BLACK CIRCLE. Both read as the editor "unsaved
+ * buffer" dot, but U+25CF belongs to Geometric Shapes and is centred on the em box,
+ * which sits below the optical centre of lowercase text and looks bottom-aligned
+ * inline. U+2022 is General Punctuation, aligned to the same optical centre as the
+ * U+00B7 separators elsewhere in the footer. The shell-prompt asterisk was rejected
+ * for the opposite reason: it rides above the baseline and reads as a footnote.
  */
-const DIRTY_MARKER = "●";
+const DIRTY_MARKER = "•";
 
 const EXEC_TIMEOUT_MS = 5000;
 const REFRESH_THROTTLE_MS = 1500;
