@@ -51,11 +51,6 @@ export default function (pi: ExtensionAPI) {
 		await refresh(ctx);
 	});
 
-	pi.on("session_switch", async (_event, ctx) => {
-		if (!ctx.hasUI) return;
-		await refresh(ctx);
-	});
-
 	pi.on("agent_end", async (_event, ctx) => {
 		if (!ctx.hasUI) return;
 		await refresh(ctx);
