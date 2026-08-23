@@ -62,6 +62,7 @@ async function getDocsChanges(pi: ExtensionAPI, cwd: string): Promise<DocsChange
 
 export default function (pi: ExtensionAPI) {
 	let lastChanges: DocsChange[] | null = null;
+	let refreshGeneration = 0;
 
 	function showWidget(ctx: ExtensionContext) {
 		if (!lastChanges) return;
@@ -86,19 +87,35 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.setWidget(WIDGET_ID, undefined);
 	}
 
-	async function refresh(ctx: ExtensionContext) {
-		lastChanges = await getDocsChanges(pi, ctx.cwd);
+	async function refresh(ctx: ExtensionContext, cwd: string, generation: number) {
+		const nextChanges = await getDocsChanges(pi, cwd);
+		if (generation !== refreshGeneration) return;
+		lastChanges = nextChanges;
 		if (lastChanges) showWidget(ctx);
 		else hideWidget(ctx);
 	}
 
-	pi.on("session_start", async (_event, ctx) => {
-		if (!ctx.hasUI) return;
-		await refresh(ctx);
+	function refreshInBackground(ctx: ExtensionContext) {
+		const cwd = ctx.cwd;
+		const generation = ++refreshGeneration;
+		void refresh(ctx, cwd, generation).catch(() => {
+			// Best-effort widget refreshes must not reject detached lifecycle work.
+		});
+	}
+
+	pi.on("session_shutdown", () => {
+		refreshGeneration++;
+		lastChanges = null;
 	});
 
-	pi.on("agent_end", async (_event, ctx) => {
+	pi.on("session_start", (_event, ctx) => {
 		if (!ctx.hasUI) return;
-		await refresh(ctx);
+		hideWidget(ctx);
+		refreshInBackground(ctx);
+	});
+
+	pi.on("agent_end", (_event, ctx) => {
+		if (!ctx.hasUI) return;
+		refreshInBackground(ctx);
 	});
 }

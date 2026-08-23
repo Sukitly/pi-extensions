@@ -222,6 +222,7 @@ export default function (pi: ExtensionAPI) {
 	let tui: TUI | null = null;
 	let lastRefreshAt = 0;
 	let refreshing = false;
+	let pendingRefreshCwd: string | null = null;
 	// The integration branch effectively never changes within a session, so it is
 	// resolved once per cwd instead of on every refresh. `undefined` means unresolved,
 	// `null` means resolved to "no base branch here".
@@ -235,12 +236,17 @@ export default function (pi: ExtensionAPI) {
 		return resolved;
 	}
 
-	async function refresh(ctx: ExtensionContext, force = false) {
-		if (refreshing) return;
+	async function refresh(cwd: string, force = false) {
+		if (refreshing) {
+			// Startup no longer blocks tool execution, so preserve one trailing refresh
+			// when files change while an earlier Git inspection is still running.
+			pendingRefreshCwd = cwd;
+			return;
+		}
 		if (!force && Date.now() - lastRefreshAt < REFRESH_THROTTLE_MS) return;
 		refreshing = true;
 		try {
-			const next = await readDiffStats(pi, ctx.cwd, await getBaseRef(ctx.cwd));
+			const next = await readDiffStats(pi, cwd, await getBaseRef(cwd));
 			lastRefreshAt = Date.now();
 			const changed =
 				next?.added !== stats?.added || next?.deleted !== stats?.deleted || next?.dirty !== stats?.dirty;
@@ -248,7 +254,16 @@ export default function (pi: ExtensionAPI) {
 			if (changed) tui?.requestRender();
 		} finally {
 			refreshing = false;
+			const trailingCwd = pendingRefreshCwd;
+			pendingRefreshCwd = null;
+			if (trailingCwd) refreshInBackground(trailingCwd, true);
 		}
+	}
+
+	function refreshInBackground(cwd: string, force = false) {
+		void refresh(cwd, force).catch(() => {
+			// Footer data is best-effort; detached refreshes must not reject lifecycle work.
+		});
 	}
 
 	function installFooter(ctx: ExtensionContext) {
@@ -258,7 +273,7 @@ export default function (pi: ExtensionAPI) {
 			tui = instanceTui;
 			const base = new FooterComponent(asFooterSession(ctx), footerData);
 			const unsubscribe = footerData.onBranchChange(() => {
-				void refresh(ctx, true);
+				refreshInBackground(ctx.cwd, true);
 			});
 
 			return {
@@ -283,21 +298,21 @@ export default function (pi: ExtensionAPI) {
 		});
 	}
 
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
 		baseRefByCwd.clear();
 		installFooter(ctx);
-		await refresh(ctx, true);
+		refreshInBackground(ctx.cwd, true);
 	});
 
-	pi.on("agent_end", async (_event, ctx) => {
+	pi.on("agent_end", (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
-		await refresh(ctx, true);
+		refreshInBackground(ctx.cwd, true);
 	});
 
-	pi.on("tool_result", async (event, ctx) => {
+	pi.on("tool_result", (event, ctx) => {
 		if (ctx.mode !== "tui") return;
 		if (!MUTATING_TOOLS.has(event.toolName)) return;
-		await refresh(ctx);
+		refreshInBackground(ctx.cwd);
 	});
 }

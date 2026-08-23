@@ -235,7 +235,7 @@ async function fetchUsage(provider: string, apiKey: string): Promise<UsageRespon
 	return null;
 }
 
-function supportsUsageWidget(provider: string | null | undefined): boolean {
+function supportsUsageWidget(provider: string | null | undefined): provider is "anthropic" | "openai-codex" {
 	return provider === "anthropic" || provider === "openai-codex";
 }
 
@@ -244,6 +244,7 @@ const MIN_REFRESH_GAP_MS = 3 * 60 * 1000;
 
 export default function (pi: ExtensionAPI) {
 	const usageCache = new Map<string, { data: UsageResponse; refreshedAt: number }>();
+	const usageRefreshes = new Map<string, Promise<void>>();
 	let activeProvider: string | null = null;
 	let lifecycleToken = 0;
 
@@ -290,57 +291,87 @@ export default function (pi: ExtensionAPI) {
 		if (!provider || !supportsUsageWidget(provider)) return;
 		const cached = usageCache.get(provider);
 		if (!force && cached && Date.now() - cached.refreshedAt < MIN_REFRESH_GAP_MS) return;
-		const apiKey = await ctx.modelRegistry.getApiKeyForProvider(provider);
-		if (!apiKey) return;
-		const data = await fetchUsage(provider, apiKey);
-		if (data) {
-			usageCache.set(provider, { data, refreshedAt: Date.now() });
+		const existingRefresh = usageRefreshes.get(provider);
+		if (existingRefresh) {
+			await existingRefresh;
+			return;
+		}
+
+		// Capture the registry before detaching: reading ctx after a reload can throw.
+		const modelRegistry = ctx.modelRegistry;
+		const refresh = (async () => {
+			const apiKey = await modelRegistry.getApiKeyForProvider(provider);
+			if (!apiKey) return;
+			const data = await fetchUsage(provider, apiKey);
+			if (data) {
+				usageCache.set(provider, { data, refreshedAt: Date.now() });
+			}
+		})();
+		usageRefreshes.set(provider, refresh);
+		try {
+			await refresh;
+		} finally {
+			if (usageRefreshes.get(provider) === refresh) usageRefreshes.delete(provider);
 		}
 	}
 
-	pi.on("session_shutdown", async () => {
+	function refreshInBackground(
+		ctx: ExtensionContext,
+		provider: string,
+		token: number,
+		force = false,
+	) {
+		void refreshUsage(ctx, provider, force)
+			.then(() => {
+				if (!isCurrent(token, provider)) return;
+				if (getCachedUsage(provider)) showWidget(ctx, provider);
+				else hideWidget(ctx);
+			})
+			.catch(() => {
+				// Usage is best-effort; detached refreshes must not reject lifecycle work.
+			});
+	}
+
+	pi.on("session_shutdown", () => {
 		lifecycleToken++;
 		activeProvider = null;
 	});
 
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", (_event, ctx) => {
+		if (!ctx.hasUI) return;
 		const provider = ctx.model?.provider ?? null;
 		const token = lifecycleToken;
 		activeProvider = provider;
 
 		if (supportsUsageWidget(provider)) {
-			await refreshUsage(ctx, provider, true);
-			if (!isCurrent(token, provider)) return;
 			if (getCachedUsage(provider)) showWidget(ctx, provider);
 			else hideWidget(ctx);
+			refreshInBackground(ctx, provider, token, true);
 		} else {
 			hideWidget(ctx);
 		}
 	});
 
-	pi.on("agent_end", async (_event, ctx) => {
+	pi.on("agent_end", (_event, ctx) => {
+		if (!ctx.hasUI) return;
 		const provider = activeProvider;
 		const token = lifecycleToken;
 
 		if (supportsUsageWidget(provider)) {
-			await refreshUsage(ctx, provider);
-			if (!isCurrent(token, provider)) return;
-			if (getCachedUsage(provider)) showWidget(ctx, provider);
-			else hideWidget(ctx);
+			refreshInBackground(ctx, provider, token);
 		}
 	});
 
-	pi.on("model_select", async (event, ctx) => {
+	pi.on("model_select", (event, ctx) => {
+		if (!ctx.hasUI) return;
 		const provider = event.model.provider;
 		const token = lifecycleToken;
 		activeProvider = provider;
 
 		if (supportsUsageWidget(provider)) {
 			if (getCachedUsage(provider)) showWidget(ctx, provider);
-			await refreshUsage(ctx, provider);
-			if (!isCurrent(token, provider)) return;
-			if (getCachedUsage(provider)) showWidget(ctx, provider);
 			else hideWidget(ctx);
+			refreshInBackground(ctx, provider, token);
 		} else {
 			hideWidget(ctx);
 		}
