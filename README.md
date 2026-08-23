@@ -91,6 +91,7 @@ Behavior:
 - Refreshes on:
   - `session_start`
   - `agent_end`
+- Refreshes in the background, so `gh` never delays startup or turn completion
 
 Use it when:
 
@@ -109,6 +110,7 @@ Behavior:
 - Refreshes on:
   - `session_start`
   - `agent_end`
+- Refreshes in the background, so Git inspection never delays startup or turn completion
 
 Use it when:
 
@@ -187,6 +189,7 @@ Behavior:
   - `agent_end`
   - `tool_result` for `bash` / `edit` / `write` / `multi_edit` / `apply_patch`, throttled to 1.5s
   - git branch changes, via `footerData.onBranchChange`
+- All Git inspection runs in the background, so it never delays startup, tool results, or turn completion
 
 Use it when:
 
@@ -331,6 +334,7 @@ Behavior:
   - `session_start`
   - `model_select`
   - `agent_end`
+- Fetches in the background, so provider APIs never delay startup, model selection, or turn completion
 
 Data sources:
 

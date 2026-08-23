@@ -12,7 +12,7 @@ function osc8Link(url: string, label: string): string {
 
 async function fetchBranchPr(pi: ExtensionAPI): Promise<BranchPr | null> {
 	try {
-		const result = await pi.exec("gh", ["pr", "view", "--json", "number,url"]);
+		const result = await pi.exec("gh", ["pr", "view", "--json", "number,url"], { timeout: 5000 });
 		if (result.code !== 0 || !result.stdout) return null;
 		const data = JSON.parse(result.stdout) as { number?: number; url?: string };
 		if (data.number && data.url) return { number: data.number, url: data.url };
@@ -26,6 +26,7 @@ const WIDGET_ID = "branch-pr";
 
 export default function (pi: ExtensionAPI) {
 	let lastPr: BranchPr | null = null;
+	let refreshGeneration = 0;
 
 	function showWidget(ctx: ExtensionContext) {
 		if (!lastPr) return;
@@ -40,19 +41,34 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.setWidget(WIDGET_ID, undefined);
 	}
 
-	async function refresh(ctx: ExtensionContext) {
-		lastPr = await fetchBranchPr(pi);
+	async function refresh(ctx: ExtensionContext, generation: number) {
+		const nextPr = await fetchBranchPr(pi);
+		if (generation !== refreshGeneration) return;
+		lastPr = nextPr;
 		if (lastPr) showWidget(ctx);
 		else hideWidget(ctx);
 	}
 
-	pi.on("session_start", async (_event, ctx) => {
-		if (!ctx.hasUI) return;
-		await refresh(ctx);
+	function refreshInBackground(ctx: ExtensionContext) {
+		const generation = ++refreshGeneration;
+		void refresh(ctx, generation).catch(() => {
+			// Best-effort widget refreshes must not reject detached lifecycle work.
+		});
+	}
+
+	pi.on("session_shutdown", () => {
+		refreshGeneration++;
+		lastPr = null;
 	});
 
-	pi.on("agent_end", async (_event, ctx) => {
+	pi.on("session_start", (_event, ctx) => {
 		if (!ctx.hasUI) return;
-		await refresh(ctx);
+		hideWidget(ctx);
+		refreshInBackground(ctx);
+	});
+
+	pi.on("agent_end", (_event, ctx) => {
+		if (!ctx.hasUI) return;
+		refreshInBackground(ctx);
 	});
 }
