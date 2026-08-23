@@ -36,18 +36,18 @@ interface DiffStats {
  * needs a figure, while "is anything uncommitted" is an ambient yes/no. Four
  * digits in a footer become something you parse instead of absorb.
  *
- * U+2981 Z NOTATION SPOT, chosen by eye against the alternatives at the terminal.
+ * A plain ASCII asterisk, settled on after living with the dot variants for a few
+ * days. The round glyphs were picked by reasoning about vertical metrics — U+25CF sits
+ * below the optical centre of lowercase text, U+2022 aligns but is too faint when
+ * dimmed, U+2981 rides the same axis as the `+` and `-` beside it — but sustained use
+ * beat that analysis: a filled dot reads as a bullet or a status LED and keeps drawing
+ * the eye, while `*` is already the dirty-tree mark in shell prompts and stays quiet.
  *
- * Glyph class drives the vertical placement here. U+25CF BLACK CIRCLE is a Geometric
- * Shape, centred on the em box, which sits below the optical centre of lowercase text
- * and looks bottom-aligned inline. U+2022 BULLET is General Punctuation and aligns
- * correctly but is too small to register once dimmed. U+2981 is a Mathematical
- * Operator, so it rides the same axis as the `+` and `-` in the counts beside it,
- * while carrying more weight than the bullet. The shell-prompt asterisk was rejected
- * for the opposite reason to U+25CF: it rides above the baseline and reads as a
- * footnote.
+ * ASCII also removes the font risk the Unicode candidates carried. It cannot render as
+ * a replacement box, and it is unambiguously single width in every terminal rather
+ * than relying on pi-tui and the terminal agreeing about an East Asian Ambiguous glyph.
  */
-const DIRTY_MARKER = "⦁";
+const DIRTY_MARKER = "*";
 
 const EXEC_TIMEOUT_MS = 5000;
 const REFRESH_THROTTLE_MS = 1500;
