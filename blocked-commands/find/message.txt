@@ -1,11 +1,5 @@
-#!/bin/bash
-
-cat >&2 <<'EOF'
 Error: find is disabled. Use fd instead:
 
   File-name/path search: fd PATTERN PATH
   File extension search: fd -e EXT . PATH
   Content search: rg PATTERN PATH
-EOF
-
-exit 1

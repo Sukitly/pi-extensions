@@ -1,0 +1,6 @@
+#!/bin/bash
+
+set -euo pipefail
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+cat "$script_dir/message.txt" >&2
+exit 1
