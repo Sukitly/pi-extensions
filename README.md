@@ -11,6 +11,7 @@ A small collection of extensions for [pi-coding-agent](https://github.com/badlog
 | `docs-changes.ts` | Shows changed files under `docs/` as a widget | Auto-runs on session start and after agent turns | Git repo with a `docs/` directory |
 | `export-dialogue.ts` | Exports the current branch to a dated, LLM-titled JSONL file | Run `/xp` | Active model credentials; optional `PI_XP_PATH` |
 | `git-diff-stats.ts` | Appends whole-branch `+added -deleted` line counts, plus an uncommitted marker, after the branch name on the footer's cwd line | Auto-runs on session start, after agent turns, and after mutating tools | Git repo; TUI mode |
+| `prefer-fd.ts` | Disables shell invocations of `find` and directs the agent to use `fd` or `rg` | Auto-runs for agent Bash tool calls | `fd` and `rg` in Pi's managed tool path |
 | `replace-pi-with-claude-code.ts` | Rewrites `pi` to `claude code` in the system prompt | Auto-runs before each agent start and before each provider request | None |
 | `read-url.ts` | Adds a `read_url` tool that reads public URLs as Markdown through Jina Reader | Agent calls `read_url` when it needs external docs | Optional `JINA_API_KEY` for authenticated Jina quota |
 | `usage-widget.ts` | Shows Anthropic or Codex usage bars for the active provider | Auto-runs on session start, model change, and after agent turns | Valid Anthropic OAuth or OpenAI Codex auth |
@@ -26,6 +27,9 @@ cp branch-pr-widget.ts ~/.pi/agent/extensions/
 cp docs-changes.ts ~/.pi/agent/extensions/
 cp export-dialogue.ts ~/.pi/agent/extensions/
 cp git-diff-stats.ts ~/.pi/agent/extensions/
+cp prefer-fd.ts ~/.pi/agent/extensions/
+mkdir -p ~/.pi/agent/extensions/intercepted-commands
+cp intercepted-commands/find ~/.pi/agent/extensions/intercepted-commands/
 cp replace-pi-with-claude-code.ts ~/.pi/agent/extensions/
 cp read-url.ts ~/.pi/agent/extensions/
 cp usage-widget.ts ~/.pi/agent/extensions/
@@ -223,6 +227,19 @@ Use it when:
 - you want a portable JSONL transcript of the current branch
 - you want dialogue exports named by topic instead of session UUID
 
+### `prefer-fd.ts`
+
+Disables shell invocations of `find` in agent Bash tool calls and directs the agent toward the faster managed search tools already provided by Pi.
+
+Behavior:
+
+- Replaces the default Bash tool and prepends `intercepted-commands/` to `PATH`
+- Blocks direct shell segments such as `find ...` and `/usr/bin/find ...` before execution
+- Uses a `find` shim to catch ordinary invocations inside compound commands and scripts
+- Returns examples for `fd` file-name/path searches and `rg` content searches
+- Does not attempt to translate `find` arguments because the two CLIs are not compatible
+- Does not restrict directory access
+
 ### `replace-pi-with-claude-code.ts`
 
 Rewrites occurrences of `pi` in the system prompt to `claude code` before each run.
@@ -382,6 +399,7 @@ Use it when:
 | `docs-changes.ts` | Hidden when there is no `docs/` directory or no matching changes. |
 | `export-dialogue.ts` | `/xp` makes a separate title-generation request with the active model. The request is not persisted in the exported session. |
 | `git-diff-stats.ts` | Replaces the footer, so it conflicts with any other `setFooter` extension (last one to run wins). It reuses the built-in `FooterComponent`, but cannot read the auto-compaction flag, so the stats line always shows `(auto)`. The base branch is resolved from local refs only; after a long gap without fetching, a branch rebased onto newer upstream commits can report a stale merge base. Shows nothing outside a git repo or when the branch has no net change. |
+| `prefer-fd.ts` | Replaces the Bash tool, so it conflicts with other Bash-tool replacement extensions; the last registered replacement wins. It affects agent Bash calls, not commands typed directly into a separate shell. |
 | `replace-pi-with-claude-code.ts` | Only affects system prompt text (agent state and serialized provider payload), not UI labels, command names, or message content. |
 | `read-url.ts` | Reads public URLs through Jina Reader. Set `JINA_API_KEY` only if you want authenticated fallback after anonymous quota is exhausted. |
 | `usage-widget.ts` | Hidden when the active provider is unsupported or no usage data is available. |
