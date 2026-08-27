@@ -8,7 +8,7 @@ A small collection of extensions for [pi-coding-agent](https://github.com/badlog
 |---|---|---|---|
 | `auth-backup.ts` | Manages backups of `~/.pi/agent/auth.json` through a single interactive command | Run `/auth-backup` | Interactive UI |
 | `branch-pr-widget.ts` | Shows the GitHub PR for the current branch | Auto-runs on session start and after agent turns | `gh` installed, current repo branch associated with a PR |
-| `continue.ts` | Sends a literal `continue` user message after the agent stops | Press `Ctrl+J` while Pi is idle | Remove `Ctrl+J` from `tui.input.newLine` if it is configured there |
+| `continue.ts` | Sends literal `continue` or `approve` user messages after the agent stops | Press `Ctrl+J` for `continue` or `Ctrl+R` for `approve` while Pi is idle | Free those keys from their built-in actions in `keybindings.json` |
 | `docs-changes.ts` | Shows changed files under `docs/` as a widget | Auto-runs on session start and after agent turns | Git repo with a `docs/` directory |
 | `export-dialogue.ts` | Exports the current branch to a dated, LLM-titled JSONL file | Run `/xp` | Active model credentials; optional `PI_XP_PATH` |
 | `git-diff-stats.ts` | Appends whole-branch `+added -deleted` line counts, plus an uncommitted marker, after the branch name on the footer's cwd line | Auto-runs on session start, after agent turns, and after mutating tools | Git repo; TUI mode |
@@ -108,28 +108,35 @@ Use it when:
 
 ### `continue.ts`
 
-Adds an idle-only shortcut for restarting work after an interruption.
+Adds idle-only shortcuts for sending common quick responses.
 
 Behavior:
 
-- Registers `Ctrl+J` as an extension shortcut
+- Registers `Ctrl+J` to send `continue`
+- Registers `Ctrl+R` to send `approve`
 - Does nothing while Pi is running, retrying, compacting, or handling queued messages
-- Sends a visible, persistent `continue` user message once Pi is idle
+- Sends the selected response as a visible, persistent user message once Pi is idle
 - Starts a new agent turn using the existing conversation context; it does not replay the last message or resume the interrupted provider stream
 
-Pi commonly binds `Ctrl+J` to `tui.input.newLine`. Remove it from that action in
-`~/.pi/agent/keybindings.json` and keep `Shift+Enter` for inserting newlines:
+Pi commonly binds `Ctrl+J` to `tui.input.newLine` and `Ctrl+R` to
+`app.session.rename`. Free both shortcuts in `~/.pi/agent/keybindings.json` and keep
+`Shift+Enter` for inserting newlines:
 
 ```json
 {
-  "tui.input.newLine": ["shift+enter"]
+  "tui.input.newLine": ["shift+enter"],
+  "app.session.rename": []
 }
 ```
+
+This removes the rename shortcut from Pi's session selector; `/name` remains available for
+renaming the active session.
 
 Use it when:
 
 - a network retry, cancelled tool call, or manual abort leaves the agent stopped
 - you want one keystroke to send the same `continue` message you would otherwise type manually
+- you want to approve a proposed action without typing the response
 
 ### `docs-changes.ts`
 
