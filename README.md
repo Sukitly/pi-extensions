@@ -8,6 +8,7 @@ A small collection of extensions for [pi-coding-agent](https://github.com/badlog
 |---|---|---|---|
 | `auth-backup.ts` | Manages backups of `~/.pi/agent/auth.json` through a single interactive command | Run `/auth-backup` | Interactive UI |
 | `branch-pr-widget.ts` | Shows the GitHub PR for the current branch | Auto-runs on session start and after agent turns | `gh` installed, current repo branch associated with a PR |
+| `continue.ts` | Sends a literal `continue` user message after the agent stops | Press `Ctrl+J` while Pi is idle | Remove `Ctrl+J` from `tui.input.newLine` if it is configured there |
 | `docs-changes.ts` | Shows changed files under `docs/` as a widget | Auto-runs on session start and after agent turns | Git repo with a `docs/` directory |
 | `export-dialogue.ts` | Exports the current branch to a dated, LLM-titled JSONL file | Run `/xp` | Active model credentials; optional `PI_XP_PATH` |
 | `git-diff-stats.ts` | Appends whole-branch `+added -deleted` line counts, plus an uncommitted marker, after the branch name on the footer's cwd line | Auto-runs on session start, after agent turns, and after mutating tools | Git repo; TUI mode |
@@ -24,6 +25,7 @@ Copy any extension file into your pi extensions directory:
 ```bash
 cp auth-backup.ts ~/.pi/agent/extensions/
 cp branch-pr-widget.ts ~/.pi/agent/extensions/
+cp continue.ts ~/.pi/agent/extensions/
 cp docs-changes.ts ~/.pi/agent/extensions/
 cp export-dialogue.ts ~/.pi/agent/extensions/
 cp git-diff-stats.ts ~/.pi/agent/extensions/
@@ -103,6 +105,31 @@ Use it when:
 
 - you work in a GitHub repo with branch-to-PR mapping
 - you want the active PR visible in the UI
+
+### `continue.ts`
+
+Adds an idle-only shortcut for restarting work after an interruption.
+
+Behavior:
+
+- Registers `Ctrl+J` as an extension shortcut
+- Does nothing while Pi is running, retrying, compacting, or handling queued messages
+- Sends a visible, persistent `continue` user message once Pi is idle
+- Starts a new agent turn using the existing conversation context; it does not replay the last message or resume the interrupted provider stream
+
+Pi commonly binds `Ctrl+J` to `tui.input.newLine`. Remove it from that action in
+`~/.pi/agent/keybindings.json` and keep `Shift+Enter` for inserting newlines:
+
+```json
+{
+  "tui.input.newLine": ["shift+enter"]
+}
+```
+
+Use it when:
+
+- a network retry, cancelled tool call, or manual abort leaves the agent stopped
+- you want one keystroke to send the same `continue` message you would otherwise type manually
 
 ### `docs-changes.ts`
 
