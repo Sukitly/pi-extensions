@@ -8,6 +8,7 @@ A small collection of extensions for [pi-coding-agent](https://github.com/badlog
 |---|---|---|---|
 | `auth-backup.ts` | Manages backups of `~/.pi/agent/auth.json` through a single interactive command | Run `/auth-backup` | Interactive UI |
 | `branch-pr-widget.ts` | Shows the GitHub PR for the current branch | Auto-runs on session start and after agent turns | `gh` installed, current repo branch associated with a PR |
+| `codex-fast.ts` | Toggles Codex Fast mode globally across Pi sessions, with a footer indicator | Run `/fast`, `/fast on`, `/fast off`, or `/fast status` | `openai-codex`; Fast availability depends on the model/account and consumes more credits |
 | `continue.ts` | Sends literal `continue` or `approve` user messages after the agent stops | Press `Ctrl+J` for `continue` or `Ctrl+R` for `approve` while Pi is idle | Free those keys from their built-in actions in `keybindings.json` |
 | `docs-changes.ts` | Shows changed files under `docs/` as a widget | Auto-runs on session start and after agent turns | Git repo with a `docs/` directory |
 | `export-dialogue.ts` | Exports the current branch to a dated, LLM-titled JSONL file | Run `/xp` | Active model credentials; optional `PI_XP_PATH` |
@@ -25,6 +26,7 @@ Copy any extension file into your pi extensions directory:
 ```bash
 cp auth-backup.ts ~/.pi/agent/extensions/
 cp branch-pr-widget.ts ~/.pi/agent/extensions/
+cp codex-fast.ts ~/.pi/agent/extensions/
 cp continue.ts ~/.pi/agent/extensions/
 cp docs-changes.ts ~/.pi/agent/extensions/
 cp export-dialogue.ts ~/.pi/agent/extensions/
@@ -105,6 +107,43 @@ Use it when:
 
 - you work in a GitHub repo with branch-to-PR mapping
 - you want the active PR visible in the UI
+
+### `codex-fast.ts`
+
+Adds a global Codex Fast switch. Defaults to OFF until explicitly enabled.
+
+| Command | Behavior |
+|---|---|
+| `/fast` | Toggle the current global preference |
+| `/fast on` | Enable Fast globally |
+| `/fast off` | Stop requesting Fast globally |
+| `/fast status` | Show the saved preference without changing it |
+
+Behavior:
+
+- ON adds `service_tier: "priority"` to `openai-codex` requests; model and reasoning settings are unchanged
+- OFF passes the original payload through unchanged. It does **not** send `"default"` or remove a tier supplied elsewhere
+- Other providers are never modified, though `/fast` can operate the global switch from any provider
+- Saves `{ "enabled": true | false }` to `~/.pi/agent/codex-fast.json`, outside this extension repo; honors `PI_CODING_AGENT_DIR` when set
+- A missing state file means OFF. The file is created on the first explicit toggle/on/off command
+- Every Codex request re-reads the file, so already-open sessions share changes from their next request without reload
+- New sessions, resumed sessions, and `/reload` all use the same global preference
+- Shows yellow `fast` after the model/thinking label, e.g. `(openai-codex) gpt-6-astra • max • fast`. OFF and non-Codex providers hide the badge; unreadable state shows yellow `fast?`
+- Inline placement uses this collection's `git-diff-stats.ts` footer via a `model:codex-fast` status. Without that renderer, Pi falls back to its ordinary extension-status row
+- Idle terminals poll for changes every second; watchers are released on reload/shutdown
+- Does not interrupt in-flight requests, and does not change other extensions' direct SDK calls that bypass Pi's provider hook
+- Malformed/unreadable state warns and does not inject priority. A bare toggle refuses unreadable state; explicit on/off can replace it
+- Fast availability and actual routing depend on the model/account/backend. The indicator shows the requested preference, not server confirmation. See [Codex speed](https://developers.openai.com/codex/speed/) for credit multipliers
+
+All open Pi instances must load this extension once via `/reload` (or restart). Subsequent switch changes need no reload.
+
+Run its tests with:
+
+```bash
+node --test tests/codex-fast.test.mjs tests/footer-model-status.test.mjs
+```
+
+Tests mock storage and do not change the real global preference or make model requests.
 
 ### `continue.ts`
 
@@ -198,8 +237,15 @@ work on `main` is visible instead of silently reading as zero.
 
 That line is rendered by pi's built-in footer, and `ctx.ui.setFooter()` replaces the footer
 wholesale. Instead of reimplementing it, the extension constructs the built-in `FooterComponent`
-over a small `ExtensionContext` adapter and rewrites only line 0 of its output, so the
-stats/model line keeps upstream behavior.
+over a small `ExtensionContext` adapter and decorates the cwd line. It also consumes this
+collection's `model:*` status keys into the model/thinking row, retaining each badge's color
+and leaving other extension statuses on the normal status row. This is a local convention,
+not a built-in Pi API.
+
+The model row keeps the built-in usage text, reserves space for badges, and drops the provider
+label before truncating the model label when space is tight. If there is no room for a model
+slot, the original line stays unchanged. The built-in footer renders only once per frame;
+adding a badge does not scan session history a second time.
 
 Base branch resolution:
 
@@ -440,6 +486,7 @@ Use it when:
 |---|---|
 | `auth-backup.ts` | Requires interactive UI. Restore replaces the full auth file, not a single provider entry. |
 | `branch-pr-widget.ts` | Hidden when no PR is associated with the current branch or `gh` is unavailable. |
+| `codex-fast.ts` | OFF leaves Pi's original payload unchanged; it does not override service-tier settings supplied elsewhere. ON requests priority and may consume more credits. |
 | `docs-changes.ts` | Hidden when there is no `docs/` directory or no matching changes. |
 | `export-dialogue.ts` | `/xp` makes a separate title-generation request with the active model. The request is not persisted in the exported session. |
 | `git-diff-stats.ts` | Replaces the footer, so it conflicts with any other `setFooter` extension (last one to run wins). It reuses the built-in `FooterComponent`, but cannot read the auto-compaction flag, so the stats line always shows `(auto)`. The base branch is resolved from local refs only; after a long gap without fetching, a branch rebased onto newer upstream commits can report a stale merge base. Shows nothing outside a git repo or when the branch has no net change. |
