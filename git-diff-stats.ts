@@ -12,16 +12,16 @@
  * The cwd line belongs to pi's built-in footer, and `setFooter` replaces the
  * footer wholesale. Rather than reimplementing it, this extension instantiates
  * the built-in `FooterComponent` against a small adapter over `ExtensionContext`
- * and only rewrites line 0 of its output, so the stats/model line keeps upstream
- * behaviour.
+ * and decorates the cwd line. It also places model:* extension statuses beside
+ * the model/thinking label, preserving their colors without a second footer owner.
  */
 
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import type { AgentSession, ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import type { AgentSession, ExtensionAPI, ExtensionContext, ReadonlyFooterDataProvider, Theme } from "@earendil-works/pi-coding-agent";
 import { FooterComponent } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { sliceByColumn, stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 interface DiffStats {
 	added: number;
@@ -217,6 +217,51 @@ function asFooterSession(ctx: ExtensionContext): AgentSession {
 	} as unknown as AgentSession;
 }
 
+/** Keep usage stats untouched and lay out model badges in the existing right-hand slot. */
+export function renderModelStatuses(
+	line: string,
+	width: number,
+	ctx: ExtensionContext,
+	theme: Theme,
+	footerData: ReadonlyFooterDataProvider,
+): string {
+	const model = ctx.model;
+	if (!model) return line;
+	const status = [...footerData.getExtensionStatuses()]
+		.filter(([key]) => key.startsWith("model:"))
+		.sort(([a], [b]) => a.localeCompare(b))
+		.map(([, text]) => text.replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim())
+		.filter(Boolean)
+		.join(" ");
+	if (!status) return line;
+
+	// FooterComponent separates usage from its model slot with >=2 spaces.
+	// No gap means usage filled the row and upstream hid the model entirely.
+	const plain = stripTerminalSequences(line);
+	const gap = / {2,}/.exec(plain);
+	if (!gap) return line;
+	const leftWidth = visibleWidth(plain.slice(0, gap.index));
+	const suffix = theme.fg("dim", " • ") + status;
+	const available = width - leftWidth - 2 - visibleWidth(suffix);
+	if (available <= 0) return line;
+
+	// Match the built-in model/thinking label and its provider-first fallback,
+	// reserving room for the badge without scanning the session a second time.
+	let label = model.id;
+	if (model.reasoning) {
+		const level = ctx.thinkingLevel || "off";
+		label += level === "off" ? " • thinking off" : ` • ${level}`;
+	}
+	const withProvider = `(${model.provider}) ${label}`;
+	if (footerData.getAvailableProviderCount() > 1 && visibleWidth(withProvider) <= available) {
+		label = withProvider;
+	}
+	label = truncateToWidth(label, available, "");
+	const left = sliceByColumn(line, 0, leftWidth);
+	const padding = " ".repeat(Math.max(2, width - leftWidth - visibleWidth(label) - visibleWidth(suffix)));
+	return left + padding + theme.fg("dim", label) + suffix;
+}
+
 export default function (pi: ExtensionAPI) {
 	let stats: DiffStats | null = null;
 	let tui: TUI | null = null;
@@ -271,7 +316,14 @@ export default function (pi: ExtensionAPI) {
 			// pi's setExtensionFooter disposes the previous footer before invoking this
 			// factory, so the assignment below always wins over the old instance's cleanup.
 			tui = instanceTui;
-			const base = new FooterComponent(asFooterSession(ctx), footerData);
+			const base = new FooterComponent(asFooterSession(ctx), {
+				getGitBranch: () => footerData.getGitBranch(),
+				getAvailableProviderCount: () => footerData.getAvailableProviderCount(),
+				onBranchChange: (callback) => footerData.onBranchChange(callback),
+				getExtensionStatuses: () => new Map(
+					[...footerData.getExtensionStatuses()].filter(([key]) => !key.startsWith("model:")),
+				),
+			});
 			const unsubscribe = footerData.onBranchChange(() => {
 				refreshInBackground(ctx.cwd, true);
 			});
@@ -287,6 +339,9 @@ export default function (pi: ExtensionAPI) {
 				},
 				render(width: number): string[] {
 					const lines = base.render(width);
+					if (lines.length > 1) {
+						lines[1] = renderModelStatuses(lines[1], width, ctx, theme, footerData);
+					}
 					if (!stats || lines.length === 0) return lines;
 					const suffix = renderStats(stats, theme);
 					const budget = width - visibleWidth(suffix);

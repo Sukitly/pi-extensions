@@ -8,6 +8,7 @@ A small collection of extensions for [pi-coding-agent](https://github.com/badlog
 |---|---|---|---|
 | `auth-backup.ts` | Manages backups of `~/.pi/agent/auth.json` through a single interactive command | Run `/auth-backup` | Interactive UI |
 | `branch-pr-widget.ts` | Shows the GitHub PR for the current branch | Auto-runs on session start and after agent turns | `gh` installed, current repo branch associated with a PR |
+| `codex-fast.ts` | Toggles Codex Fast mode globally across Pi sessions, with a footer indicator | Run `/fast`, `/fast on`, `/fast off`, or `/fast status` | `openai-codex`; Fast availability depends on the model/account and consumes more credits |
 | `continue.ts` | Sends literal `continue` or `approve` user messages after the agent stops | Press `Ctrl+J` for `continue` or `Ctrl+R` for `approve` while Pi is idle | Free those keys from their built-in actions in `keybindings.json` |
 | `docs-changes.ts` | Shows changed files under `docs/` as a widget | Auto-runs on session start and after agent turns | Git repo with a `docs/` directory |
 | `export-dialogue.ts` | Exports the current branch to a dated, LLM-titled JSONL file | Run `/xp` | Active model credentials; optional `PI_XP_PATH` |
@@ -25,6 +26,7 @@ Copy any extension file into your pi extensions directory:
 ```bash
 cp auth-backup.ts ~/.pi/agent/extensions/
 cp branch-pr-widget.ts ~/.pi/agent/extensions/
+cp codex-fast.ts ~/.pi/agent/extensions/
 cp continue.ts ~/.pi/agent/extensions/
 cp docs-changes.ts ~/.pi/agent/extensions/
 cp export-dialogue.ts ~/.pi/agent/extensions/
@@ -105,6 +107,58 @@ Use it when:
 
 - you work in a GitHub repo with branch-to-PR mapping
 - you want the active PR visible in the UI
+
+### `codex-fast.ts`
+
+Adds a global Fast switch for agent-loop Codex requests. Defaults to OFF until explicitly enabled.
+
+| Command | Behavior |
+|---|---|
+| `/fast` | Toggle the current global preference |
+| `/fast on` | Enable Fast globally |
+| `/fast off` | Stop requesting Fast globally |
+| `/fast status` | Show the saved preference and whether the current model is in scope, without changing it |
+
+Supported models use the `openai-codex` provider and these exact IDs:
+
+- `gpt-5.5`
+- `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`
+- `gpt-6-astra`
+
+GPT-5.4 is excluded because OpenAI [retired it from Codex with ChatGPT sign-in on August 31, 2026](https://developers.openai.com/codex/models#deprecated-codex-models).
+
+Unlisted IDs, including other variants and snapshots, receive no Fast injection or badge. Commands explain when Fast is inactive for the current model, but can still change the global preference for supported sessions. New IDs require an explicit support check before being added; inclusion does not establish account eligibility or confirm routing. The model scope follows [Codex Fast mode documentation](https://developers.openai.com/codex/speed/).
+
+Behavior:
+
+- ON adds `service_tier: "priority"` to supported agent-loop `openai-codex` requests; model and reasoning settings are unchanged
+- A provider-specific stream adapter also passes the final payload tier to the native SDK's pricing options, including when the response reports `default` or omits its tier. Amounts remain SDK estimates, not confirmed credit charges
+- The adapter preserves the built-in model catalog and authentication. Another extension overriding `openai-codex` streaming can replace this adapter
+- OFF passes the original payload through unchanged. It does **not** send `"default"` or remove a tier supplied elsewhere
+- Other providers are never modified, though `/fast` can operate the global switch from any provider
+- Saves `{ "enabled": true | false }` to `~/.pi/agent/codex-fast.json`, outside this extension repo; honors `PI_CODING_AGENT_DIR` when set
+- Writes an exclusive, mode-0600 temporary file in the same directory, flushes and closes it, then atomically renames it over the preference. Concurrent readers see a complete old or new snapshot
+- Publication failures leave the previous preference intact. Unpublished temporary files are retained for diagnosis and their paths appear in the error
+- A missing state file means OFF. The file is created on the first explicit toggle/on/off command
+- Every supported agent-loop Codex request re-reads the file, so already-open sessions share changes from their next supported agent-loop request without reload
+- New sessions, resumed sessions, and `/reload` all use the same global preference
+- Shows yellow `fast` after the model/thinking label, e.g. `(openai-codex) gpt-6-astra • max • fast`. OFF, unlisted model IDs, and non-Codex providers hide the badge; unreadable state shows yellow `fast?` only for supported models
+- Inline placement uses this collection's `git-diff-stats.ts` footer via a `model:codex-fast` status. Without that renderer, Pi falls back to its ordinary extension-status row
+- Idle terminals poll for changes every second; watchers are released on reload/shutdown
+- Does not interrupt in-flight requests. Pi's built-in manual/automatic compaction and `/tree` branch summaries do not run the agent-loop payload hook and are not affected. Other extensions' direct SDK calls that bypass the hook are also unaffected
+- Malformed/unreadable state warns and does not inject priority. A bare toggle refuses unreadable state; explicit on/off can replace it
+- TUI and RPC use UI notifications. Print/JSON modes write command results and diagnostics to stderr, preserving JSON stdout. Failed writes, unreadable `/fast status`, refused toggles, and invalid arguments set a nonzero exit code; background read warnings alone do not
+- Fast availability and actual routing depend on the model/account/backend. The indicator shows the requested preference, not server confirmation. See [Codex speed](https://developers.openai.com/codex/speed/) for credit multipliers
+
+All open Pi instances must load this extension once via `/reload` (or restart). Subsequent switch changes need no reload.
+
+Run its tests with:
+
+```bash
+node --test tests/codex-fast.test.mjs tests/codex-fast.integration.test.mjs tests/footer-model-status.test.mjs
+```
+
+Tests require Node 24 and a globally installed Pi compatible with 0.85.0. Unit tests mock storage; integration tests use real isolated temporary files, concurrent reader processes, the real SDK with mocked HTTP, and actual print/JSON CLI processes with fake credentials. They do not change the live preference or use model credits. Temporary test artifacts are retained.
 
 ### `continue.ts`
 
@@ -198,8 +252,15 @@ work on `main` is visible instead of silently reading as zero.
 
 That line is rendered by pi's built-in footer, and `ctx.ui.setFooter()` replaces the footer
 wholesale. Instead of reimplementing it, the extension constructs the built-in `FooterComponent`
-over a small `ExtensionContext` adapter and rewrites only line 0 of its output, so the
-stats/model line keeps upstream behavior.
+over a small `ExtensionContext` adapter and decorates the cwd line. It also consumes this
+collection's `model:*` status keys into the model/thinking row, retaining each badge's color
+and leaving other extension statuses on the normal status row. This is a local convention,
+not a built-in Pi API.
+
+The model row keeps the built-in usage text, reserves space for badges, and drops the provider
+label before truncating the model label when space is tight. If there is no room for a model
+slot, the original line stays unchanged. The built-in footer renders only once per frame;
+adding a badge does not scan session history a second time.
 
 Base branch resolution:
 
@@ -440,6 +501,7 @@ Use it when:
 |---|---|
 | `auth-backup.ts` | Requires interactive UI. Restore replaces the full auth file, not a single provider entry. |
 | `branch-pr-widget.ts` | Hidden when no PR is associated with the current branch or `gh` is unavailable. |
+| `codex-fast.ts` | OFF leaves Pi's original payload unchanged; it does not override service-tier settings supplied elsewhere. ON requests priority and may consume more credits. |
 | `docs-changes.ts` | Hidden when there is no `docs/` directory or no matching changes. |
 | `export-dialogue.ts` | `/xp` makes a separate title-generation request with the active model. The request is not persisted in the exported session. |
 | `git-diff-stats.ts` | Replaces the footer, so it conflicts with any other `setFooter` extension (last one to run wins). It reuses the built-in `FooterComponent`, but cannot read the auto-compaction flag, so the stats line always shows `(auto)`. The base branch is resolved from local refs only; after a long gap without fetching, a branch rebased onto newer upstream commits can report a stale merge base. Shows nothing outside a git repo or when the branch has no net change. |
