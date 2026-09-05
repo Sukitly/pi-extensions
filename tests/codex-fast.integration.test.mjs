@@ -43,14 +43,14 @@ const model = {
 const userMessage = { role: "user", content: "Test", timestamp: 0 };
 const context = { systemPrompt: "Integration fixture", messages: [userMessage] };
 
-function harness(directory) {
+function harness(directory, selectedModel = model) {
 	const handlers = new Map();
 	const commands = new Map();
 	const providers = new Map();
 	const notifications = [];
 	let hookCalls = 0;
 	const ctx = {
-		mode: "rpc", model,
+		mode: "rpc", model: selectedModel,
 		ui: { notify: (message, level) => notifications.push({ message, level }) },
 	};
 	const previous = process.env.PI_CODING_AGENT_DIR;
@@ -143,7 +143,7 @@ const { default: extension } = await import(process.env.TEST_EXTENSION_URL);
 loader.deregister();
 const handlers = new Map();
 extension({ on: (n, h) => handlers.set(n, h), registerCommand() {}, registerProvider() {} });
-const ctx = { mode: 'rpc', model: { provider: 'openai-codex' }, ui: { notify() {} } };
+const ctx = { mode: 'rpc', model: { provider: 'openai-codex', id: 'gpt-6-astra' }, ui: { notify() {} } };
 let reads = 0, misses = 0, running = true, started = false;
 function batch() {
   for (let i = 0; i < 128; i++) {
@@ -229,6 +229,20 @@ for (const returnedTier of ["priority", "default", "missing"]) {
 		assert.deepEqual(actualHttp.requests[0].reasoning, { effort: "max", summary: "auto" });
 		assert.equal(actualHttp.responseCallbacks(), 1);
 		assert.equal(options.serviceTier, undefined, "Do not mutate the caller's options");
+	});
+}
+
+for (const [id, enabled] of [["gpt-6-astra", true], ["gpt-5.3-codex-spark", false], ["gpt-6-astra-unverified-snapshot", false]]) {
+	test(`native SDK request respects the model allowlist for ${id}`, async () => {
+		const selectedModel = { ...model, id };
+		const h = harness(sandbox().directory, selectedModel);
+		await h.run("on");
+		const http = mockHttp();
+		await resultOf(h.stream(selectedModel, context, { ...http.options, onPayload: h.onPayload }));
+		assert.equal(http.requests[0].model, id);
+		assert.equal(Object.hasOwn(http.requests[0], "service_tier"), enabled);
+		assert.equal(http.requests[0].service_tier, enabled ? "priority" : undefined);
+		assert.deepEqual(http.requests[0].reasoning, { effort: "max", summary: "auto" });
 	});
 }
 
@@ -336,12 +350,12 @@ test("native compaction summaries and branch summaries bypass Fast even while th
 	assert.equal(h.hookCalls(), 0);
 });
 
-function cli(directory, command, mode = "print") {
+function cli(directory, command, mode = "print", modelId = "gpt-5.5") {
 	const result = spawnSync("pi", [
 		"--offline", ...(mode === "json" ? ["--mode", "json"] : ["-p"]),
 		"--no-session", "--no-extensions", "-e", extensionPath,
 		"--no-skills", "--no-prompt-templates", "--no-approve", "--no-tools",
-		"--provider", "openai-codex", "--model", "gpt-5.5", "--api-key", fakeToken, command,
+		"--provider", "openai-codex", "--model", modelId, "--api-key", fakeToken, command,
 	], {
 		cwd: directory, env: { ...process.env, PI_CODING_AGENT_DIR: directory, PI_OFFLINE: "1" },
 		encoding: "utf8", timeout: 20000,
@@ -358,11 +372,21 @@ for (const mode of ["print", "json"]) {
 		const { directory, statePath } = sandbox();
 		const status = cli(directory, "/fast status", mode);
 		assert.equal(status.status, 0, status.stderr);
-		assert.match(status.stderr, /Fast OFF globally for agent-loop Codex requests/);
+		assert.match(status.stderr, /Fast OFF globally for supported agent-loop Codex models/);
 		if (mode === "print") assert.equal(status.stdout, "");
 		const on = cli(directory, "/fast on", mode);
 		assert.equal(on.status, 0, on.stderr);
 		assert.match(on.stderr, /Fast ON globally/);
+		assert.deepEqual(readFastState(statePath), { enabled: true });
+	});
+
+	test(`actual ${mode} CLI explains unlisted model inactivity without changing the global preference`, { timeout: 30000 }, () => {
+		const { directory, statePath } = sandbox();
+		writeFastState(statePath, true);
+		const status = cli(directory, "/fast status", mode, "gpt-5.3-codex-spark");
+		assert.equal(status.status, 0, status.stderr);
+		assert.match(status.stderr, /Fast ON globally.*Fast is inactive for gpt-5.3-codex-spark: model is not in this extension's supported list/);
+		if (mode === "print") assert.equal(status.stdout, "");
 		assert.deepEqual(readFastState(statePath), { enabled: true });
 	});
 

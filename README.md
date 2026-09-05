@@ -117,11 +117,21 @@ Adds a global Fast switch for agent-loop Codex requests. Defaults to OFF until e
 | `/fast` | Toggle the current global preference |
 | `/fast on` | Enable Fast globally |
 | `/fast off` | Stop requesting Fast globally |
-| `/fast status` | Show the saved preference without changing it |
+| `/fast status` | Show the saved preference and whether the current model is in scope, without changing it |
+
+Supported models use the `openai-codex` provider and these exact IDs:
+
+- `gpt-5.5`
+- `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`
+- `gpt-6-astra`
+
+GPT-5.4 is excluded because OpenAI [retired it from Codex with ChatGPT sign-in on August 31, 2026](https://developers.openai.com/codex/models#deprecated-codex-models).
+
+Unlisted IDs, including other variants and snapshots, receive no Fast injection or badge. Commands explain when Fast is inactive for the current model, but can still change the global preference for supported sessions. New IDs require an explicit support check before being added; inclusion does not establish account eligibility or confirm routing. The model scope follows [Codex Fast mode documentation](https://developers.openai.com/codex/speed/).
 
 Behavior:
 
-- ON adds `service_tier: "priority"` to agent-loop `openai-codex` requests; model and reasoning settings are unchanged
+- ON adds `service_tier: "priority"` to supported agent-loop `openai-codex` requests; model and reasoning settings are unchanged
 - A provider-specific stream adapter also passes the final payload tier to the native SDK's pricing options, including when the response reports `default` or omits its tier. Amounts remain SDK estimates, not confirmed credit charges
 - The adapter preserves the built-in model catalog and authentication. Another extension overriding `openai-codex` streaming can replace this adapter
 - OFF passes the original payload through unchanged. It does **not** send `"default"` or remove a tier supplied elsewhere
@@ -130,9 +140,9 @@ Behavior:
 - Writes an exclusive, mode-0600 temporary file in the same directory, flushes and closes it, then atomically renames it over the preference. Concurrent readers see a complete old or new snapshot
 - Publication failures leave the previous preference intact. Unpublished temporary files are retained for diagnosis and their paths appear in the error
 - A missing state file means OFF. The file is created on the first explicit toggle/on/off command
-- Every agent-loop Codex request re-reads the file, so already-open sessions share changes from their next agent-loop request without reload
+- Every supported agent-loop Codex request re-reads the file, so already-open sessions share changes from their next supported agent-loop request without reload
 - New sessions, resumed sessions, and `/reload` all use the same global preference
-- Shows yellow `fast` after the model/thinking label, e.g. `(openai-codex) gpt-6-astra • max • fast`. OFF and non-Codex providers hide the badge; unreadable state shows yellow `fast?`
+- Shows yellow `fast` after the model/thinking label, e.g. `(openai-codex) gpt-6-astra • max • fast`. OFF, unlisted model IDs, and non-Codex providers hide the badge; unreadable state shows yellow `fast?` only for supported models
 - Inline placement uses this collection's `git-diff-stats.ts` footer via a `model:codex-fast` status. Without that renderer, Pi falls back to its ordinary extension-status row
 - Idle terminals poll for changes every second; watchers are released on reload/shutdown
 - Does not interrupt in-flight requests. Pi's built-in manual/automatic compaction and `/tree` branch summaries do not run the agent-loop payload hook and are not affected. Other extensions' direct SDK calls that bypass the hook are also unaffected

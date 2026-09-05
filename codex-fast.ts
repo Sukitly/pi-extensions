@@ -14,6 +14,21 @@ const STATUS_KEY = "model:codex-fast";
 const USAGE = "/fast [on|off|status]";
 const nativeCodex = openAICodexResponsesApi();
 
+// Explicit model aliases covered by https://developers.openai.com/codex/speed/.
+// New aliases and snapshots require verification, not prefix matching.
+// Model support does not establish account eligibility or confirm server routing.
+const FAST_MODEL_IDS = new Set([
+	"gpt-5.5",
+	"gpt-5.6-sol",
+	"gpt-5.6-terra",
+	"gpt-5.6-luna",
+	"gpt-6-astra",
+]);
+
+function supportsFast(model: ExtensionContext["model"]): boolean {
+	return model?.provider === "openai-codex" && FAST_MODEL_IDS.has(model.id);
+}
+
 type FastState = { enabled: boolean; error?: string };
 
 export function getFastStatePath(): string {
@@ -114,7 +129,7 @@ export default function (pi: ExtensionAPI) {
 		if (ctx.mode === "tui") {
 			ctx.ui.setStatus(
 				STATUS_KEY,
-				ctx.model?.provider === "openai-codex" && (state.enabled || state.error)
+				supportsFast(ctx.model) && (state.enabled || state.error)
 					? ctx.ui.theme.fg("warning", state.error ? "fast?" : "fast")
 					: undefined,
 			);
@@ -127,7 +142,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	pi.registerCommand("fast", {
-		description: "Toggle global Fast for agent-loop Codex requests, or use on/off/status (higher credit usage when ON)",
+		description: "Toggle global Fast for supported agent-loop Codex models, or use on/off/status (higher credit usage when ON)",
 		getArgumentCompletions: (prefix) => {
 			const items = ["on", "off", "status"]
 				.filter((value) => value.startsWith(prefix))
@@ -142,14 +157,18 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const state = refresh(ctx);
-			const inactive = ctx.model?.provider === "openai-codex"
+			const inactive = supportsFast(ctx.model)
 				? ""
-				: " This session's provider is unaffected.";
+				: !ctx.model
+					? " No active model; Fast is inactive in this session."
+					: ctx.model.provider === "openai-codex"
+						? ` Fast is inactive for ${ctx.model.id}: model is not in this extension's supported list.`
+						: " This session's provider is unaffected.";
 			if (action === "status") {
 				report(ctx,
 					state.error
 						? `Fast status unavailable: cannot read ${statePath}. This extension will not request priority.${inactive}`
-						: `Fast ${state.enabled ? "ON" : "OFF"} globally for agent-loop Codex requests.${inactive}`,
+						: `Fast ${state.enabled ? "ON" : "OFF"} globally for supported agent-loop Codex models.${inactive}`,
 					state.error ? "error" : "info",
 					Boolean(state.error),
 				);
@@ -169,7 +188,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			refresh(ctx);
 			report(ctx,
-				`Fast ${enabled ? "ON" : "OFF"} globally. Applies from the next agent-loop Codex request.${enabled ? " Higher credit usage." : ""}${inactive}`,
+				`Fast ${enabled ? "ON" : "OFF"} globally. Applies from the next supported agent-loop Codex request.${enabled ? " Higher credit usage." : ""}${inactive}`,
 				"info",
 			);
 		},
@@ -180,7 +199,7 @@ export default function (pi: ExtensionAPI) {
 		stopWatching = () => {};
 		refresh(ctx);
 		// Keep other open terminals' indicators in sync, even while they are idle.
-		// Each agent-loop request reads the file independently of this poll.
+		// Each supported agent-loop request reads the file independently of this poll.
 		if (ctx.mode === "tui") {
 			const onChange = () => { if (currentContext) refresh(currentContext); };
 			fs.watchFile(statePath, { persistent: false, interval: 1000 }, onChange);
@@ -198,7 +217,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("before_provider_request", (event, ctx) => {
-		if (ctx.model?.provider !== "openai-codex") return;
+		if (!supportsFast(ctx.model)) return;
 		if (!refresh(ctx).enabled) return;
 		if (!event.payload || typeof event.payload !== "object" || Array.isArray(event.payload)) {
 			report(ctx, "Fast mode skipped: unexpected Codex request payload.", "warning");

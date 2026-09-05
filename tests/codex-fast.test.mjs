@@ -76,7 +76,7 @@ function mockStorage(t, enabled) {
 	return storage;
 }
 
-function createSession(provider = "openai-codex", mode = "tui") {
+function createSession(provider = "openai-codex", mode = "tui", id = "gpt-6-astra") {
 	const handlers = new Map();
 	const commands = new Map();
 	const providers = new Map();
@@ -85,7 +85,7 @@ function createSession(provider = "openai-codex", mode = "tui") {
 	const colors = [];
 	const ctx = {
 		mode,
-		model: { provider, id: "test-model" },
+		model: { provider, id },
 		ui: {
 			theme: { fg: (color, text) => { colors.push(color); return text; } },
 			setStatus: (key, text) => text === undefined ? statuses.delete(key) : statuses.set(key, text),
@@ -110,10 +110,10 @@ test("missing global preference defaults OFF without writing a file or adding a 
 	const storage = mockStorage(t);
 	const session = createSession();
 	session.emit("session_start");
-	const payload = { model: "test-model" };
+	const payload = { model: "gpt-6-astra" };
 	assert.equal(session.statuses.get(STATUS_KEY), undefined);
 	assert.equal(session.request(payload), undefined);
-	assert.deepEqual(payload, { model: "test-model" });
+	assert.deepEqual(payload, { model: "gpt-6-astra" });
 	assert.equal(storage.writes.length, 0);
 });
 
@@ -121,7 +121,7 @@ test("ON persists globally and injects priority without mutating other request f
 	const storage = mockStorage(t);
 	const session = createSession();
 	await session.run("on");
-	const payload = { model: "test-model", reasoning: { effort: "max" }, service_tier: "flex" };
+	const payload = { model: "gpt-6-astra", reasoning: { effort: "max" }, service_tier: "flex" };
 	assert.deepEqual(session.request(payload), { ...payload, service_tier: "priority" });
 	assert.equal(payload.service_tier, "flex");
 	assert.deepEqual(JSON.parse(storage.text), { enabled: true });
@@ -137,11 +137,11 @@ test("OFF leaves the original payload alone: no default tier and no deletion of 
 	mockStorage(t, true);
 	const session = createSession();
 	await session.run("off");
-	const plain = { model: "test-model" };
-	const configured = { model: "test-model", service_tier: "flex" };
+	const plain = { model: "gpt-6-astra" };
+	const configured = { model: "gpt-6-astra", service_tier: "flex" };
 	assert.equal(session.request(plain), undefined);
 	assert.equal(session.request(configured), undefined);
-	assert.deepEqual(plain, { model: "test-model" });
+	assert.deepEqual(plain, { model: "gpt-6-astra" });
 	assert.equal(configured.service_tier, "flex");
 	assert.equal(session.statuses.get(STATUS_KEY), undefined);
 });
@@ -217,17 +217,93 @@ test("other providers are untouched, but may still operate the global switch", a
 	assert.equal(codex.request({}), undefined);
 });
 
+test("all allowlisted Codex models request priority and show the yellow badge", (t) => {
+	mockStorage(t, true);
+	for (const id of ["gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-6-astra"]) {
+		const session = createSession("openai-codex", "tui", id);
+		session.emit("session_start");
+		const payload = { model: id, reasoning: { effort: "max" } };
+		assert.deepEqual(session.request(payload), { ...payload, service_tier: "priority" }, id);
+		assert.equal(session.statuses.get(STATUS_KEY), "fast", id);
+		assert.equal(session.colors.at(-1), "warning", id);
+		session.emit("session_shutdown");
+	}
+});
+
+test("unlisted Codex IDs are inactive without changing payloads or the global preference", async (t) => {
+	const storage = mockStorage(t, true);
+	for (const id of ["gpt-5.4", "gpt-5.3-codex-spark", "gpt-5.3-codex", "gpt-6-astra-pro", "gpt-6-astra-unverified-snapshot", "gpt-5.6-sol-extra", "unknown", ""]) {
+		const session = createSession("openai-codex", "tui", id);
+		session.emit("session_start");
+		for (const payload of [{ model: id }, { model: id, service_tier: "flex" }]) {
+			const original = structuredClone(payload);
+			assert.equal(session.request(payload), undefined, id);
+			assert.deepEqual(payload, original, id);
+		}
+		assert.equal(session.statuses.has(STATUS_KEY), false, id);
+		await session.run("status");
+		assert.match(session.notifications.at(-1).message, /Fast ON globally.*Fast is inactive.*not in this extension's supported list/);
+		session.emit("session_shutdown");
+	}
+	assert.equal(storage.writes.length, 0);
+	assert.deepEqual(JSON.parse(storage.text), { enabled: true });
+});
+
+test("allowlisted IDs on other providers still receive no Fast injection or badge", (t) => {
+	mockStorage(t, true);
+	for (const provider of ["openai", "anthropic", "custom-codex"]) {
+		const session = createSession(provider);
+		session.emit("session_start");
+		assert.equal(session.request({ model: "gpt-6-astra" }), undefined, provider);
+		assert.equal(session.statuses.has(STATUS_KEY), false, provider);
+		session.emit("session_shutdown");
+	}
+});
+
+test("unlisted models can still operate the global switch for supported sessions", async (t) => {
+	const storage = mockStorage(t);
+	const unsupported = createSession("openai-codex", "tui", "gpt-5.3-codex-spark");
+	const supported = createSession();
+	await unsupported.run("on");
+	assert.match(unsupported.notifications.at(-1).message, /Fast ON globally.*Fast is inactive/);
+	assert.equal(unsupported.statuses.has(STATUS_KEY), false);
+	assert.equal(supported.request({}).service_tier, "priority");
+	await unsupported.run("off");
+	assert.equal(supported.request({}), undefined);
+	assert.deepEqual(JSON.parse(storage.text), { enabled: false });
+});
+
+test("unlisted models do not display fast? when global state is unreadable", (t) => {
+	const storage = mockStorage(t);
+	storage.text = "{";
+	const session = createSession("openai-codex", "tui", "gpt-5.3-codex-spark");
+	session.emit("session_start");
+	assert.equal(session.statuses.has(STATUS_KEY), false);
+	assert.equal(session.request({}), undefined);
+	assert.match(session.notifications.at(-1).message, /Cannot read/);
+});
+
 test("model changes hide or restore the indicator, including later idle refreshes", (t) => {
 	const storage = mockStorage(t, true);
 	const session = createSession();
 	session.emit("session_start");
-	session.ctx.model = { provider: "anthropic" };
-	session.emit("model_select");
-	for (const listener of storage.listeners) listener();
-	assert.equal(session.statuses.has(STATUS_KEY), false);
-	session.ctx.model = { provider: "openai-codex" };
+	for (const model of [
+		{ provider: "anthropic", id: "gpt-6-astra" },
+		{ provider: "openai-codex", id: "gpt-5.3-codex-spark" },
+		{ provider: "openai-codex" },
+		undefined,
+	]) {
+		session.ctx.model = model;
+		session.emit("model_select");
+		for (const listener of storage.listeners) listener();
+		assert.equal(session.statuses.has(STATUS_KEY), false);
+		assert.equal(session.request({}), undefined);
+	}
+	session.ctx.model = { provider: "openai-codex", id: "gpt-6-astra" };
 	session.emit("model_select");
 	assert.equal(session.statuses.get(STATUS_KEY), "fast");
+	assert.equal(session.request({}).service_tier, "priority");
+	assert.equal(storage.writes.length, 0);
 });
 
 test("headless mode needs no watcher or footer, but still reads global state per request", (t) => {
