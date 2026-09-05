@@ -110,7 +110,7 @@ Use it when:
 
 ### `codex-fast.ts`
 
-Adds a global Codex Fast switch. Defaults to OFF until explicitly enabled.
+Adds a global Fast switch for agent-loop Codex requests. Defaults to OFF until explicitly enabled.
 
 | Command | Behavior |
 |---|---|
@@ -121,18 +121,23 @@ Adds a global Codex Fast switch. Defaults to OFF until explicitly enabled.
 
 Behavior:
 
-- ON adds `service_tier: "priority"` to `openai-codex` requests; model and reasoning settings are unchanged
+- ON adds `service_tier: "priority"` to agent-loop `openai-codex` requests; model and reasoning settings are unchanged
+- A provider-specific stream adapter also passes the final payload tier to the native SDK's pricing options, including when the response reports `default` or omits its tier. Amounts remain SDK estimates, not confirmed credit charges
+- The adapter preserves the built-in model catalog and authentication. Another extension overriding `openai-codex` streaming can replace this adapter
 - OFF passes the original payload through unchanged. It does **not** send `"default"` or remove a tier supplied elsewhere
 - Other providers are never modified, though `/fast` can operate the global switch from any provider
 - Saves `{ "enabled": true | false }` to `~/.pi/agent/codex-fast.json`, outside this extension repo; honors `PI_CODING_AGENT_DIR` when set
+- Writes an exclusive, mode-0600 temporary file in the same directory, flushes and closes it, then atomically renames it over the preference. Concurrent readers see a complete old or new snapshot
+- Publication failures leave the previous preference intact. Unpublished temporary files are retained for diagnosis and their paths appear in the error
 - A missing state file means OFF. The file is created on the first explicit toggle/on/off command
-- Every Codex request re-reads the file, so already-open sessions share changes from their next request without reload
+- Every agent-loop Codex request re-reads the file, so already-open sessions share changes from their next agent-loop request without reload
 - New sessions, resumed sessions, and `/reload` all use the same global preference
 - Shows yellow `fast` after the model/thinking label, e.g. `(openai-codex) gpt-6-astra • max • fast`. OFF and non-Codex providers hide the badge; unreadable state shows yellow `fast?`
 - Inline placement uses this collection's `git-diff-stats.ts` footer via a `model:codex-fast` status. Without that renderer, Pi falls back to its ordinary extension-status row
 - Idle terminals poll for changes every second; watchers are released on reload/shutdown
-- Does not interrupt in-flight requests, and does not change other extensions' direct SDK calls that bypass Pi's provider hook
+- Does not interrupt in-flight requests. Pi's built-in manual/automatic compaction and `/tree` branch summaries do not run the agent-loop payload hook and are not affected. Other extensions' direct SDK calls that bypass the hook are also unaffected
 - Malformed/unreadable state warns and does not inject priority. A bare toggle refuses unreadable state; explicit on/off can replace it
+- TUI and RPC use UI notifications. Print/JSON modes write command results and diagnostics to stderr, preserving JSON stdout. Failed writes, unreadable `/fast status`, refused toggles, and invalid arguments set a nonzero exit code; background read warnings alone do not
 - Fast availability and actual routing depend on the model/account/backend. The indicator shows the requested preference, not server confirmation. See [Codex speed](https://developers.openai.com/codex/speed/) for credit multipliers
 
 All open Pi instances must load this extension once via `/reload` (or restart). Subsequent switch changes need no reload.
@@ -140,10 +145,10 @@ All open Pi instances must load this extension once via `/reload` (or restart). 
 Run its tests with:
 
 ```bash
-node --test tests/codex-fast.test.mjs tests/footer-model-status.test.mjs
+node --test tests/codex-fast.test.mjs tests/codex-fast.integration.test.mjs tests/footer-model-status.test.mjs
 ```
 
-Tests mock storage and do not change the real global preference or make model requests.
+Tests require Node 24 and a globally installed Pi compatible with 0.85.0. Unit tests mock storage; integration tests use real isolated temporary files, concurrent reader processes, the real SDK with mocked HTTP, and actual print/JSON CLI processes with fake credentials. They do not change the live preference or use model credits. Temporary test artifacts are retained.
 
 ### `continue.ts`
 

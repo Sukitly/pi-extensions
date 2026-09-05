@@ -1,39 +1,116 @@
 import fs from "node:fs";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { join } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { basename, dirname, join } from "node:path";
+import {
+	clampThinkingLevel,
+	openAICodexResponsesApi,
+	type OpenAICodexResponsesOptions,
+} from "@earendil-works/pi-ai/compat";
+import type { ExtensionAPI, ExtensionContext, ProviderConfig } from "@earendil-works/pi-coding-agent";
 
 // The shared footer places model:* statuses after the model/thinking label.
 const STATUS_KEY = "model:codex-fast";
 const USAGE = "/fast [on|off|status]";
+const nativeCodex = openAICodexResponsesApi();
 
 type FastState = { enabled: boolean; error?: string };
 
-/** A shared preference, not session state. OFF leaves Pi's original payload alone. */
-export default function (pi: ExtensionAPI) {
+export function getFastStatePath(): string {
 	const agentDir = process.env.PI_CODING_AGENT_DIR?.replace(/^~(?=$|\/)/, homedir())
 		|| join(homedir(), ".pi", "agent");
-	const statePath = join(agentDir, "codex-fast.json");
+	return join(agentDir, "codex-fast.json");
+}
+
+export function readFastState(statePath: string): FastState {
+	try {
+		const data: unknown = JSON.parse(fs.readFileSync(statePath, "utf8"));
+		if (!data || typeof data !== "object" || !("enabled" in data) || typeof data.enabled !== "boolean") {
+			throw new Error('Expected { "enabled": true | false }');
+		}
+		return { enabled: data.enabled };
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return { enabled: false };
+		return { enabled: false, error: error instanceof Error ? error.message : String(error) };
+	}
+}
+
+/** Publish one complete snapshot. Readers see the previous file or the new one, never a partial write. */
+export function writeFastState(statePath: string, enabled: boolean): void {
+	const directory = dirname(statePath);
+	fs.mkdirSync(directory, { recursive: true });
+	const temporary = join(directory, `.${basename(statePath)}.${randomUUID()}.tmp`);
+	let fd: number | undefined;
+	let created = false;
+	try {
+		fd = fs.openSync(temporary, "wx", 0o600);
+		created = true;
+		fs.writeFileSync(fd, `${JSON.stringify({ enabled }, null, 2)}\n`);
+		fs.fsyncSync(fd);
+		const closing = fd;
+		fd = undefined;
+		fs.closeSync(closing);
+		fs.renameSync(temporary, statePath);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		// Failed temporary files are retained for diagnosis, not published or deleted.
+		throw new Error(`${message}${created ? `. Unpublished temporary file: ${temporary}` : ""}`, { cause: error });
+	} finally {
+		if (fd !== undefined) {
+			try { fs.closeSync(fd); } catch { /* Preserve the original publication error. */ }
+		}
+	}
+}
+
+/** Keep the SDK's pricing input aligned with the final payload after all extension hooks. */
+export const streamCodexWithTier: NonNullable<ProviderConfig["streamSimple"]> = (model, context, options) => {
+	// Built-in compaction and branch summaries do not carry the agent-loop onPayload hook.
+	// Leave those calls on the original simple-stream path; this adapter never reads the Fast preference.
+	if (!options?.onPayload) return nativeCodex.streamSimple(model, context, options);
+
+	// Pi 0.85's native streamSimple drops serviceTier. Use the native full stream,
+	// preserving transport/auth/callbacks and the same reasoning-level conversion.
+	const requestOptions: OpenAICodexResponsesOptions & Record<string, unknown> = { ...options };
+	if (options.reasoning) {
+		const level = clampThinkingLevel(model, options.reasoning);
+		requestOptions.reasoningEffort = level === "off" ? undefined : level;
+	}
+	const onPayload = options.onPayload;
+	requestOptions.onPayload = async (payload, requestModel) => {
+		const replacement = await onPayload(payload, requestModel);
+		const finalPayload = replacement === undefined ? payload : replacement;
+		requestOptions.serviceTier = finalPayload && typeof finalPayload === "object" && "service_tier" in finalPayload
+			? finalPayload.service_tier as OpenAICodexResponsesOptions["serviceTier"]
+			: undefined;
+		return replacement;
+	};
+	return nativeCodex.stream(model, context, requestOptions);
+};
+
+function report(ctx: ExtensionContext, message: string, level: "info" | "warning" | "error", failed = false): void {
+	if (ctx.mode === "tui" || ctx.mode === "rpc") {
+		ctx.ui.notify(message, level);
+	} else {
+		// Keep JSON stdout machine-readable. Pi catches command exceptions, so throwing
+		// alone cannot make a failed print/JSON command exit unsuccessfully.
+		process.stderr.write(`[codex-fast] ${message}\n`);
+		if (failed) process.exitCode = 1;
+	}
+}
+
+/** A shared preference for agent-loop requests, not session state. OFF leaves the payload alone. */
+export default function (pi: ExtensionAPI) {
+	const statePath = getFastStatePath();
 	let currentContext: ExtensionContext | undefined;
 	let stopWatching = () => {};
 	let lastReadError: string | undefined;
 
-	function readState(): FastState {
-		try {
-			const data: unknown = JSON.parse(fs.readFileSync(statePath, "utf8"));
-			if (!data || typeof data !== "object" || !("enabled" in data) || typeof data.enabled !== "boolean") {
-				throw new Error('Expected { "enabled": true | false }');
-			}
-			return { enabled: data.enabled };
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === "ENOENT") return { enabled: false };
-			return { enabled: false, error: error instanceof Error ? error.message : String(error) };
-		}
-	}
+	// Override streaming only. Keep the existing provider's models, OAuth, and request authentication.
+	pi.registerProvider("openai-codex", { api: "openai-codex-responses", streamSimple: streamCodexWithTier });
 
 	function refresh(ctx: ExtensionContext): FastState {
 		currentContext = ctx;
-		const state = readState();
+		const state = readFastState(statePath);
 		if (ctx.mode === "tui") {
 			ctx.ui.setStatus(
 				STATUS_KEY,
@@ -43,14 +120,14 @@ export default function (pi: ExtensionAPI) {
 			);
 		}
 		if (state.error && state.error !== lastReadError) {
-			ctx.ui.notify(`Cannot read ${statePath}: ${state.error}. This extension will not request priority.`, "warning");
+			report(ctx, `Cannot read ${statePath}: ${state.error}. This extension will not request priority.`, "warning");
 		}
 		lastReadError = state.error;
 		return state;
 	}
 
 	pi.registerCommand("fast", {
-		description: "Toggle global Codex Fast mode, or use on/off/status (higher credit usage when ON)",
+		description: "Toggle global Fast for agent-loop Codex requests, or use on/off/status (higher credit usage when ON)",
 		getArgumentCompletions: (prefix) => {
 			const items = ["on", "off", "status"]
 				.filter((value) => value.startsWith(prefix))
@@ -60,7 +137,7 @@ export default function (pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			const action = args.trim().toLowerCase();
 			if (!["", "on", "off", "status"].includes(action)) {
-				ctx.ui.notify(`Usage: ${USAGE}. No argument toggles the global setting.`, "warning");
+				report(ctx, `Usage: ${USAGE}. No argument toggles the global setting.`, "warning", true);
 				return;
 			}
 
@@ -69,30 +146,30 @@ export default function (pi: ExtensionAPI) {
 				? ""
 				: " This session's provider is unaffected.";
 			if (action === "status") {
-				ctx.ui.notify(
+				report(ctx,
 					state.error
 						? `Fast status unavailable: cannot read ${statePath}. This extension will not request priority.${inactive}`
-						: `Fast ${state.enabled ? "ON" : "OFF"} globally.${inactive}`,
-					state.error ? "warning" : "info",
+						: `Fast ${state.enabled ? "ON" : "OFF"} globally for agent-loop Codex requests.${inactive}`,
+					state.error ? "error" : "info",
+					Boolean(state.error),
 				);
 				return;
 			}
 			if (!action && state.error) {
-				ctx.ui.notify("Cannot toggle an unreadable setting. Use /fast on or /fast off explicitly to replace it.", "warning");
+				report(ctx, "Cannot toggle an unreadable setting. Use /fast on or /fast off explicitly to replace it.", "warning", true);
 				return;
 			}
 
 			const enabled = action ? action === "on" : !state.enabled;
 			try {
-				fs.mkdirSync(agentDir, { recursive: true });
-				fs.writeFileSync(statePath, `${JSON.stringify({ enabled }, null, 2)}\n`, { mode: 0o600 });
+				writeFastState(statePath, enabled);
 			} catch (error) {
-				ctx.ui.notify(`Could not save Fast mode: ${error instanceof Error ? error.message : String(error)}`, "error");
+				report(ctx, `Could not save Fast mode: ${error instanceof Error ? error.message : String(error)}`, "error", true);
 				return;
 			}
 			refresh(ctx);
-			ctx.ui.notify(
-				`Fast ${enabled ? "ON" : "OFF"} globally. Applies from the next Codex request.${enabled ? " Higher credit usage." : ""}${inactive}`,
+			report(ctx,
+				`Fast ${enabled ? "ON" : "OFF"} globally. Applies from the next agent-loop Codex request.${enabled ? " Higher credit usage." : ""}${inactive}`,
 				"info",
 			);
 		},
@@ -103,7 +180,7 @@ export default function (pi: ExtensionAPI) {
 		stopWatching = () => {};
 		refresh(ctx);
 		// Keep other open terminals' indicators in sync, even while they are idle.
-		// Request correctness does not depend on this poll: every request reads the file.
+		// Each agent-loop request reads the file independently of this poll.
 		if (ctx.mode === "tui") {
 			const onChange = () => { if (currentContext) refresh(currentContext); };
 			fs.watchFile(statePath, { persistent: false, interval: 1000 }, onChange);
@@ -124,7 +201,7 @@ export default function (pi: ExtensionAPI) {
 		if (ctx.model?.provider !== "openai-codex") return;
 		if (!refresh(ctx).enabled) return;
 		if (!event.payload || typeof event.payload !== "object" || Array.isArray(event.payload)) {
-			ctx.ui.notify("Fast mode skipped: unexpected Codex request payload.", "warning");
+			report(ctx, "Fast mode skipped: unexpected Codex request payload.", "warning");
 			return;
 		}
 		return { ...event.payload, service_tier: "priority" };

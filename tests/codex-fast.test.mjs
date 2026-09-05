@@ -1,7 +1,20 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import { registerHooks } from "node:module";
+import { dirname, join } from "node:path";
 import test from "node:test";
-import codexFastExtension from "../codex-fast.ts";
+import { pathToFileURL } from "node:url";
+
+const root = join(execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim(), "@earendil-works/pi-coding-agent");
+const compatUrl = pathToFileURL(join(root, "node_modules/@earendil-works/pi-ai/dist/compat.js")).href;
+const loader = registerHooks({
+	resolve(specifier, context, nextResolve) {
+		return nextResolve(specifier === "@earendil-works/pi-ai/compat" ? compatUrl : specifier, context);
+	},
+});
+const { default: codexFastExtension } = await import("../codex-fast.ts");
+loader.deregister();
 
 const STATUS_KEY = "model:codex-fast";
 
@@ -12,6 +25,8 @@ function mockStorage(t, enabled) {
 		readError: undefined,
 		writeError: undefined,
 		writes: [],
+		publications: [],
+		temporaryFiles: new Map(),
 		listeners: new Set(),
 		paths: [],
 	};
@@ -23,10 +38,33 @@ function mockStorage(t, enabled) {
 		return storage.text;
 	});
 	t.mock.method(fs, "mkdirSync", () => {});
-	t.mock.method(fs, "writeFileSync", (path, text, options) => {
+	const descriptors = new Map();
+	let nextFd = 100;
+	t.mock.method(fs, "openSync", (path, flags, mode) => {
+		assert.equal(flags, "wx");
+		assert.equal(mode, 0o600);
+		const fd = nextFd++;
+		descriptors.set(fd, path);
+		storage.temporaryFiles.set(path, "");
+		return fd;
+	});
+	t.mock.method(fs, "writeFileSync", (fd, text) => {
+		assert.ok(descriptors.has(fd), "Write only to an exclusively opened temporary file");
+		const path = descriptors.get(fd);
+		storage.writes.push({ path, text, options: { mode: 0o600 } });
+		storage.temporaryFiles.set(path, storage.writeError ? "{" : text);
 		if (storage.writeError) throw storage.writeError;
+	});
+	t.mock.method(fs, "fsyncSync", fd => { assert.ok(descriptors.has(fd)); });
+	t.mock.method(fs, "closeSync", fd => { assert.ok(descriptors.delete(fd)); });
+	t.mock.method(fs, "renameSync", (source, target) => {
+		assert.equal(dirname(source), dirname(target));
+		assert.ok(![...descriptors.values()].includes(source), "Close the complete file before publishing");
+		const text = storage.temporaryFiles.get(source);
+		assert.equal(typeof JSON.parse(text).enabled, "boolean");
 		storage.text = text;
-		storage.writes.push({ path, text, options });
+		storage.temporaryFiles.delete(source);
+		storage.publications.push({ source, target });
 	});
 	t.mock.method(fs, "watchFile", (_path, options, listener) => {
 		assert.deepEqual(options, { persistent: false, interval: 1000 });
@@ -41,6 +79,7 @@ function mockStorage(t, enabled) {
 function createSession(provider = "openai-codex", mode = "tui") {
 	const handlers = new Map();
 	const commands = new Map();
+	const providers = new Map();
 	const statuses = new Map();
 	const notifications = [];
 	const colors = [];
@@ -56,9 +95,10 @@ function createSession(provider = "openai-codex", mode = "tui") {
 	codexFastExtension({
 		on: (name, handler) => handlers.set(name, handler),
 		registerCommand: (name, command) => commands.set(name, command),
+		registerProvider: (name, config) => providers.set(name, config),
 	});
 	return {
-		ctx, statuses, notifications, colors,
+		ctx, statuses, notifications, colors, providers,
 		command: commands.get("fast"),
 		emit: (name, event = {}) => handlers.get(name)(event, ctx),
 		run: (args) => commands.get("fast").handler(args, ctx),
@@ -86,6 +126,8 @@ test("ON persists globally and injects priority without mutating other request f
 	assert.equal(payload.service_tier, "flex");
 	assert.deepEqual(JSON.parse(storage.text), { enabled: true });
 	assert.equal(storage.writes[0].options.mode, 0o600);
+	assert.equal(storage.publications.length, 1);
+	assert.equal(storage.temporaryFiles.size, 0);
 	assert.equal(session.statuses.get(STATUS_KEY), "fast");
 	assert.equal(session.colors.at(-1), "warning", "Keep the existing yellow, not dim gray");
 	assert.match(session.notifications.at(-1).message, /Higher credit usage/);
@@ -236,7 +278,7 @@ test("explicit status still answers when a repeated read warning has been dedupl
 	assert.equal(storage.writes.length, 0);
 });
 
-test("failed writes do not report success or change request behavior", async (t) => {
+test("partially written temporary files do not publish or change request behavior", async (t) => {
 	const storage = mockStorage(t, false);
 	storage.writeError = new Error("disk full");
 	const session = createSession();
@@ -245,6 +287,18 @@ test("failed writes do not report success or change request behavior", async (t)
 	assert.match(session.notifications.at(-1).message, /Could not save/);
 	assert.equal(session.request({}), undefined);
 	assert.deepEqual(JSON.parse(storage.text), { enabled: false });
+	assert.equal(storage.publications.length, 0);
+	assert.deepEqual([...storage.temporaryFiles.values()], ["{"]);
+});
+
+test("provider registration overrides only streaming, not models or authentication", (t) => {
+	mockStorage(t);
+	const session = createSession();
+	assert.equal(session.providers.size, 1);
+	const config = session.providers.get("openai-codex");
+	assert.deepEqual(Object.keys(config).sort(), ["api", "streamSimple"]);
+	assert.equal(config.api, "openai-codex-responses");
+	assert.equal(typeof config.streamSimple, "function");
 });
 
 test("unexpected payloads are left alone rather than turned into malformed requests", (t) => {
