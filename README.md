@@ -9,7 +9,7 @@ A small collection of extensions for [pi-coding-agent](https://github.com/badlog
 | `auth-backup.ts` | Manages backups of `~/.pi/agent/auth.json` through a single interactive command | Run `/auth-backup` | Interactive UI |
 | `branch-pr-widget.ts` | Shows the GitHub PR for the current branch | Auto-runs on session start and after agent turns | `gh` installed, current repo branch associated with a PR |
 | `continue.ts` | Sends literal `continue` or `approve` user messages after the agent stops | Press `Ctrl+J` for `continue` or `Ctrl+R` for `approve` while Pi is idle | Free those keys from their built-in actions in `keybindings.json` |
-| `docs-changes.ts` | Shows changed files under `docs/` as a widget | Auto-runs on session start and after agent turns | Git repo with a `docs/` directory |
+| `docs-changes.ts` | Shows changed files under `agent-docs/` (fallback: `docs/`) as a widget | Auto-runs on session start and after agent turns | Git repo with an `agent-docs/` or `docs/` directory |
 | `export-dialogue.ts` | Exports the current branch to a dated, LLM-titled JSONL file | Run `/xp` | Active model credentials; optional `PI_XP_PATH` |
 | `git-diff-stats.ts` | Appends whole-branch `+added -deleted` line counts, plus an uncommitted marker, after the branch name on the footer's cwd line | Auto-runs on session start, after agent turns, and after mutating tools | Git repo; TUI mode |
 | `disable-find.ts` | Blocks agent Bash invocations of `find` and directs the agent to use `fd` or `rg` | Auto-runs for agent Bash tool calls | `fd` and `rg` in Pi's managed tool path |
@@ -140,13 +140,14 @@ Use it when:
 
 ### `docs-changes.ts`
 
-Shows changed files in `docs/` as a widget.
+Shows changed files in `agent-docs/` as a widget, falling back to `docs/` if `agent-docs/` does not exist.
 
 Behavior:
 
-- Reads tracked changes from `git diff --name-status HEAD -- docs/`
-- Reads untracked files from `git ls-files --others --exclude-standard -- docs/`
-- Ignores `docs/index.md` and nested `index.md`
+- Prefers `agent-docs/`; falls back only when the directory is missing, not when it has no changes
+- Reads tracked changes from `git diff --name-status HEAD -- <selected-directory>/`
+- Reads untracked files from `git ls-files --others --exclude-standard -- <selected-directory>/`
+- Ignores root and nested `index.md` in the selected directory
 - Refreshes on:
   - `session_start`
   - `agent_end`
@@ -440,7 +441,7 @@ Use it when:
 |---|---|
 | `auth-backup.ts` | Requires interactive UI. Restore replaces the full auth file, not a single provider entry. |
 | `branch-pr-widget.ts` | Hidden when no PR is associated with the current branch or `gh` is unavailable. |
-| `docs-changes.ts` | Hidden when there is no `docs/` directory or no matching changes. |
+| `docs-changes.ts` | Hidden when neither `agent-docs/` nor `docs/` exists, or the selected directory has no matching changes. |
 | `export-dialogue.ts` | `/xp` makes a separate title-generation request with the active model. The request is not persisted in the exported session. |
 | `git-diff-stats.ts` | Replaces the footer, so it conflicts with any other `setFooter` extension (last one to run wins). It reuses the built-in `FooterComponent`, but cannot read the auto-compaction flag, so the stats line always shows `(auto)`. The base branch is resolved from local refs only; after a long gap without fetching, a branch rebased onto newer upstream commits can report a stale merge base. Shows nothing outside a git repo or when the branch has no net change. |
 | `disable-find.ts` | Applies only to agent Bash tool calls. User-initiated `!` and `!!` Bash commands in Pi remain unrestricted. The extension fails to load if its dedicated shim or shared message file is missing. |

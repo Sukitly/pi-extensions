@@ -1,5 +1,5 @@
 /**
- * Docs Changes - Show changes in docs/ directory as a widget
+ * Docs Changes - Show changes in agent-docs/ (falling back to docs/) as a widget
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -17,20 +17,21 @@ interface DocsChange {
 }
 
 async function getDocsChanges(pi: ExtensionAPI, cwd: string): Promise<DocsChange[] | null> {
-	const docsDir = join(cwd, "docs");
-	if (!existsSync(docsDir)) return null;
+	const docsDir = existsSync(join(cwd, "agent-docs")) ? "agent-docs" : "docs";
+	if (!existsSync(join(cwd, docsDir))) return null;
+	const docsPrefix = `${docsDir}/`;
 
 	const changes: DocsChange[] = [];
 	const seen = new Set<string>();
 
 	// Tracked file changes (modified, deleted, staged)
-	const diff = await pi.exec("git", ["diff", "--name-status", "HEAD", "--", "docs/"], {
+	const diff = await pi.exec("git", ["diff", "--name-status", "HEAD", "--", docsPrefix], {
 		timeout: 5000,
 	});
 	if (diff.code === 0 && diff.stdout.trim()) {
 		for (const line of diff.stdout.trim().split("\n")) {
 			const [status, ...rest] = line.split("\t");
-			const file = rest.join("\t").replace(/^docs\//, "");
+			const file = rest.join("\t").replace(new RegExp(`^${docsPrefix}`), "");
 			if (!status || !file || seen.has(file) || file.endsWith("/index.md") || file === "index.md") continue;
 			seen.add(file);
 
@@ -45,12 +46,12 @@ async function getDocsChanges(pi: ExtensionAPI, cwd: string): Promise<DocsChange
 	}
 
 	// Untracked files
-	const untracked = await pi.exec("git", ["ls-files", "--others", "--exclude-standard", "--", "docs/"], {
+	const untracked = await pi.exec("git", ["ls-files", "--others", "--exclude-standard", "--", docsPrefix], {
 		timeout: 5000,
 	});
 	if (untracked.code === 0 && untracked.stdout.trim()) {
 		for (const file of untracked.stdout.trim().split("\n")) {
-			const short = file.replace(/^docs\//, "");
+			const short = file.replace(new RegExp(`^${docsPrefix}`), "");
 			if (!short || seen.has(short) || short.endsWith("/index.md") || short === "index.md") continue;
 			seen.add(short);
 			changes.push({ prefix: "+", file: short, kind: "added" });
