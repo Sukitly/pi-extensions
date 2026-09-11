@@ -17,7 +17,7 @@
  */
 
 import { readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import type { AgentSession, ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { FooterComponent } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
@@ -82,9 +82,23 @@ async function resolveBaseRef(pi: ExtensionAPI, cwd: string): Promise<string | n
 	return null;
 }
 
+/** Read every head of an in-progress merge, including octopus merges and worktrees. */
+async function readMergedHeads(pi: ExtensionAPI, cwd: string): Promise<string[]> {
+	const path = await git(pi, cwd, ["rev-parse", "--git-path", "MERGE_HEAD"]);
+	if (!path) return [];
+	try {
+		return readFileSync(isAbsolute(path) ? path : join(cwd, path), "utf8")
+			.split("\n")
+			.map((line) => line.trim())
+			.filter(Boolean);
+	} catch {
+		return []; // Normally means no merge is in progress.
+	}
+}
+
 /**
- * Commit to diff the working tree against: always the merge base with the
- * integration branch.
+ * Commit to diff the working tree against: the merge base with the integration
+ * branch, advanced to cover upstream work in an uncommitted merge.
  *
  * Deliberately not special-cased per branch. One rule holds everywhere — "everything
  * you have that the integration branch does not" — so the number never silently
@@ -99,7 +113,23 @@ async function resolveBaseRef(pi: ExtensionAPI, cwd: string): Promise<string | n
 async function resolveDiffBase(pi: ExtensionAPI, cwd: string, baseRef: string | null): Promise<string> {
 	if (!baseRef) return "HEAD";
 	// Fails on unrelated histories or a shallow clone that lacks the fork point.
-	return (await git(pi, cwd, ["merge-base", baseRef, "HEAD"])) ?? "HEAD";
+	let base = await git(pi, cwd, ["merge-base", baseRef, "HEAD"]);
+	if (!base) return "HEAD";
+	// HEAD stays at the pre-merge tip until commit, but the working tree already
+	// contains merged-in upstream work. Do not count that work as local additions.
+	// Unresolved conflicts still contribute temporary working-tree differences.
+	for (const head of await readMergedHeads(pi, cwd)) {
+		const candidate = await git(pi, cwd, ["merge-base", baseRef, head]);
+		if (!candidate || candidate === base) continue;
+		const result = await pi.exec("git", ["merge-base", "--is-ancestor", base, candidate], {
+			cwd,
+			timeout: EXEC_TIMEOUT_MS,
+		});
+		// Incomparable candidates have no single newest base; conservatively keep
+		// the current one rather than inventing a synthetic merge base.
+		if (result.code === 0) base = candidate;
+	}
+	return base;
 }
 
 function countLines(path: string): number {
