@@ -13,6 +13,7 @@ A small collection of extensions for [pi-coding-agent](https://github.com/badlog
 | `export-dialogue.ts` | Exports the current branch to a dated, LLM-titled JSONL file | Run `/xp` | Active model credentials; optional `PI_XP_PATH` |
 | `git-diff-stats.ts` | Appends whole-branch `+added -deleted` line counts, plus an uncommitted marker, after the branch name on the footer's cwd line | Auto-runs on session start, after agent turns, and after mutating tools | Git repo; TUI mode |
 | `disable-find.ts` | Blocks agent Bash invocations of `find` and directs the agent to use `fd` or `rg` | Auto-runs for agent Bash tool calls | `fd` and `rg` in Pi's managed tool path |
+| `patch-loop-guard.ts` | Appends a structural-diagnosis reminder once a file has been edited three times in one session | Auto-runs after agent `edit`/`write` tool calls | None |
 | `replace-pi-with-claude-code.ts` | Rewrites `pi` to `claude code` in the system prompt | Auto-runs before each agent start and before each provider request | None |
 | `read-url.ts` | Adds a `read_url` tool that reads public URLs as Markdown through Jina Reader | Agent calls `read_url` when it needs external docs | Optional `JINA_API_KEY` for authenticated Jina quota |
 | `usage-widget.ts` | Shows Anthropic or Codex usage bars for the active provider | Auto-runs on session start, model change, and after agent turns | Valid Anthropic OAuth or OpenAI Codex auth |
@@ -34,6 +35,7 @@ mkdir -p ~/.pi/agent/extensions/blocked-commands/find
 cp blocked-commands/find/find ~/.pi/agent/extensions/blocked-commands/find/
 cp blocked-commands/find/message.txt ~/.pi/agent/extensions/blocked-commands/find/
 chmod +x ~/.pi/agent/extensions/blocked-commands/find/find
+cp patch-loop-guard.ts ~/.pi/agent/extensions/
 cp replace-pi-with-claude-code.ts ~/.pi/agent/extensions/
 cp read-url.ts ~/.pi/agent/extensions/
 cp usage-widget.ts ~/.pi/agent/extensions/
@@ -285,6 +287,29 @@ Run its tests with:
 node --test tests/disable-find.test.mjs
 ```
 
+### `patch-loop-guard.ts`
+
+Counts how often the agent edits each file and interrupts the third edit with a reminder to diagnose the structure instead of writing another patch.
+
+Behavior:
+
+- Counts successful `edit` and `write` tool calls per absolute file path, per session
+- On the third edit of a file, appends one text block to that tool result asking for an explicit fix / redesign / refactor / rewrite verdict before further edits
+- Fires once per file; later edits pass through untouched
+- Ignores failed tool calls, since a rejected edit is not a patch
+- Resets its counts on `session_start`
+
+Use it when:
+
+- the agent tends to keep patching one file round after round instead of questioning its design
+- you want the "stop and re-diagnose" signal to come from a counter rather than from the agent noticing its own loop
+
+Run its tests with:
+
+```bash
+node --test tests/patch-loop-guard.test.mjs
+```
+
 ### `replace-pi-with-claude-code.ts`
 
 Rewrites occurrences of `pi` in the system prompt to `claude code` before each run.
@@ -445,6 +470,7 @@ Use it when:
 | `export-dialogue.ts` | `/xp` makes a separate title-generation request with the active model. The request is not persisted in the exported session. |
 | `git-diff-stats.ts` | Replaces the footer, so it conflicts with any other `setFooter` extension (last one to run wins). It reuses the built-in `FooterComponent`, but cannot read the auto-compaction flag, so the stats line always shows `(auto)`. The base branch is resolved from local refs only; after a long gap without fetching, a branch rebased onto newer upstream commits can report a stale merge base. Shows nothing outside a git repo or when the branch has no net change. |
 | `disable-find.ts` | Applies only to agent Bash tool calls. User-initiated `!` and `!!` Bash commands in Pi remain unrestricted. The extension fails to load if its dedicated shim or shared message file is missing. |
+| `patch-loop-guard.ts` | Counts are in-memory and per session: resuming a session or editing the same file across sessions starts from zero. A file moved or renamed mid-session counts as a new file. |
 | `replace-pi-with-claude-code.ts` | Only affects system prompt text (agent state and serialized provider payload), not UI labels, command names, or message content. |
 | `read-url.ts` | Reads public URLs through Jina Reader. Set `JINA_API_KEY` only if you want authenticated fallback after anonymous quota is exhausted. |
 | `usage-widget.ts` | Hidden when the active provider is unsupported or no usage data is available. |
