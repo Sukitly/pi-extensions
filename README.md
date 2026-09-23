@@ -416,7 +416,7 @@ Use it when:
 
 ### `tps.ts`
 
-Notifies the interactive UI after an agent run with output tokens per second, input and output tokens, cache reads and writes, total tokens, and elapsed time. The rate divides output tokens by the entire agent run duration, including tool execution and other delays; it is not the model's pure generation speed. Runs with no output tokens produce no notification.
+Notifies the interactive UI after an agent run with output tokens per second, input and output tokens, total tokens, cache-hit percentage, and elapsed time. Cache hit is cache-read tokens divided by all prompt tokens (uncached input + cache reads + cache writes), rounded to a whole percentage unless a partial hit would round to 100%; runs with no prompt tokens omit the percentage. The rate divides output tokens by the entire agent run duration, including tool execution and other delays; it is not the model's pure generation speed. Runs with no output tokens produce no notification.
 
 ### `fix-anthropic-thinking-block-drop.ts`
 
@@ -454,7 +454,7 @@ Use it when:
 | `replace-pi-with-claude-code.ts` | Only affects system prompt text (agent state and serialized provider payload), not UI labels, command names, or message content. |
 | `read-url.ts` | Reads public URLs through Jina Reader. Set `JINA_API_KEY` only if you want authenticated fallback after anonymous quota is exhausted. |
 | `usage-widget.ts` | Hidden when the active provider is unsupported or no usage data is available. |
-| `tps.ts` | Requires an interactive UI and a completed agent run with output tokens. The reported rate includes tool execution time. |
+| `tps.ts` | Requires an interactive UI and a completed agent run with output tokens. The reported rate includes tool execution time; cache-hit percentage is omitted when there are no prompt tokens. |
 | `fix-anthropic-thinking-block-drop.ts` | Workaround for a pi-ai thinking-block drop bug. Acts only on the `anthropic-messages` API and same-model turns. Remove once pi-ai keeps signed empty-text thinking blocks. |
 
 ## License
