@@ -16,6 +16,7 @@ A small collection of extensions for [pi-coding-agent](https://github.com/badlog
 | `replace-pi-with-claude-code.ts` | Rewrites `pi` to `claude code` in the system prompt | Auto-runs before each agent start and before each provider request | None |
 | `read-url.ts` | Adds a `read_url` tool that reads public URLs as Markdown through Jina Reader | Agent calls `read_url` when it needs external docs | Optional `JINA_API_KEY` for authenticated Jina quota |
 | `usage-widget.ts` | Shows Anthropic or Codex usage bars for the active provider | Auto-runs on session start, model change, and after agent turns | Valid Anthropic OAuth or OpenAI Codex auth |
+| `tps.ts` | Reports output tokens per second and token usage after each agent run | Auto-runs after agent turns | Interactive UI |
 | `fix-anthropic-thinking-block-drop.ts` | Reinjects signed thinking blocks that pi-ai drops, avoiding Anthropic `400` errors on Opus/Sonnet 4.8 | Auto-runs before each Anthropic provider request | Anthropic model with thinking enabled |
 
 ## Installation
@@ -37,6 +38,7 @@ chmod +x ~/.pi/agent/extensions/blocked-commands/find/find
 cp replace-pi-with-claude-code.ts ~/.pi/agent/extensions/
 cp read-url.ts ~/.pi/agent/extensions/
 cp usage-widget.ts ~/.pi/agent/extensions/
+cp tps.ts ~/.pi/agent/extensions/
 cp fix-anthropic-thinking-block-drop.ts ~/.pi/agent/extensions/
 ```
 
@@ -412,6 +414,10 @@ Use it when:
 
 ![usage-widget screenshot](assets/screenshot.png)
 
+### `tps.ts`
+
+Notifies the interactive UI after an agent run with output tokens per second, input and output tokens, cache reads and writes, total tokens, and elapsed time. The rate divides output tokens by the entire agent run duration, including tool execution and other delays; it is not the model's pure generation speed. Runs with no output tokens produce no notification.
+
 ### `fix-anthropic-thinking-block-drop.ts`
 
 Workaround for an Anthropic `400` error seen on Opus/Sonnet 4.8:
@@ -448,6 +454,7 @@ Use it when:
 | `replace-pi-with-claude-code.ts` | Only affects system prompt text (agent state and serialized provider payload), not UI labels, command names, or message content. |
 | `read-url.ts` | Reads public URLs through Jina Reader. Set `JINA_API_KEY` only if you want authenticated fallback after anonymous quota is exhausted. |
 | `usage-widget.ts` | Hidden when the active provider is unsupported or no usage data is available. |
+| `tps.ts` | Requires an interactive UI and a completed agent run with output tokens. The reported rate includes tool execution time. |
 | `fix-anthropic-thinking-block-drop.ts` | Workaround for a pi-ai thinking-block drop bug. Acts only on the `anthropic-messages` API and same-model turns. Remove once pi-ai keeps signed empty-text thinking blocks. |
 
 ## License
