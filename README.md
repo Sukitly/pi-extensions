@@ -6,6 +6,7 @@ A small collection of extensions for [pi-coding-agent](https://github.com/badlog
 
 | File | What it does | How to use | Requirements |
 |---|---|---|---|
+| `bash-timeout.ts` | Enforces a 60-second default and 300-second maximum for agent Bash calls | Auto-runs for agent Bash tool calls | None |
 | `auth-backup.ts` | Manages backups of `~/.pi/agent/auth.json` through a single interactive command | Run `/auth-backup` | Interactive UI |
 | `branch-pr-widget.ts` | Shows the GitHub PR for the current branch | Auto-runs on session start and after agent turns | `gh` installed, current repo branch associated with a PR |
 | `continue.ts` | Sends literal `continue` or `approve` user messages after the agent stops | Press `Ctrl+J` for `continue` or `Ctrl+R` for `approve` while Pi is idle | Free those keys from their built-in actions in `keybindings.json` |
@@ -24,6 +25,7 @@ A small collection of extensions for [pi-coding-agent](https://github.com/badlog
 Copy any extension file into your pi extensions directory:
 
 ```bash
+cp bash-timeout.ts ~/.pi/agent/extensions/
 cp auth-backup.ts ~/.pi/agent/extensions/
 cp branch-pr-widget.ts ~/.pi/agent/extensions/
 cp continue.ts ~/.pi/agent/extensions/
@@ -55,6 +57,27 @@ pi -e ./auth-backup.ts
 ```
 
 ## Extensions
+
+### `bash-timeout.ts`
+
+Limits agent Bash tool timeouts through the `tool_call` hook, without replacing the built-in tool.
+
+- Defaults omitted timeouts to 60 seconds
+- Preserves finite positive numeric timeouts up to and including 300 seconds
+- Rejects explicit invalid or excessive values before execution, without clamping (schema validation may reject invalid types earlier)
+- Rejection explains that the command was not executed, gives the supplied value and legal range, and asks the agent to correct its request
+- Adds system-prompt guidance describing the policy; no result rewriting or per-call tracking is needed
+- Covers nested Bash calls through `ctx.executeTool`, including codemode
+- Preserves native shell settings, cancellation, process cleanup, output, and rendering
+- Coexists with `disable-find.ts`; only omitted timeouts are filled in, and native tool results are unchanged
+- Does not affect user `!` / `!!` commands or extension-owned subprocesses
+- Limits each call, not cumulative retries or detached background jobs; this is not a sandbox
+
+Run its tests with:
+
+```bash
+node --test tests/bash-timeout.test.mjs
+```
 
 ### `auth-backup.ts`
 
