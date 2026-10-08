@@ -66,12 +66,16 @@ Limits agent Bash tool timeouts through the `tool_call` hook, without replacing 
 - Preserves finite positive numeric timeouts up to and including 300 seconds
 - Rejects explicit invalid or excessive values before execution, without clamping (schema validation may reject invalid types earlier)
 - Rejection explains that the command was not executed, gives the supplied value and legal range, and asks the agent to correct its request
+- Rejects direct shell `timeout` / `gtimeout` invocations before the entire Bash call executes, including common wrappers, paths, pipelines and command lists; use the tool's timeout parameter instead
+- Rejection explicitly says no search was performed, preventing a hidden `command not found` error from looking like an empty search result
+- Allows ordinary arguments/search terms, quoted text, comments, heredoc bodies, and availability checks such as `command -v timeout`
 - Adds system-prompt guidance describing the policy; no result rewriting or per-call tracking is needed
 - Covers nested Bash calls through `ctx.executeTool`, including codemode
 - Preserves native shell settings, cancellation, process cleanup, output, and rendering
 - Coexists with `disable-find.ts`; only omitted timeouts are filled in, and native tool results are unchanged
 - Does not affect user `!` / `!!` commands or extension-owned subprocesses
 - Limits each call, not cumulative retries or detached background jobs; this is not a sandbox
+- Shell detection is a lexical guard, not a complete Bash parser: it does not resolve aliases/variables, inspect scripts passed to `bash -c`/`eval`, or expand substitutions inside quoted strings/heredocs. Complex wrapper options and shell grammar are not fully modeled
 
 Run its tests with:
 

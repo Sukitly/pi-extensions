@@ -63,3 +63,62 @@ test("prompt guidance is appended once and describes rejection", () => {
 test("no result rewriting or correction tracking hooks remain", () => {
 	assert.deepEqual([...hooks().keys()], ["before_agent_start", "tool_call"]);
 });
+
+test("rejects shell timeout wrappers before any command executes", () => {
+	const hook = hooks().get("tool_call");
+	for (const command of [
+		'timeout 50 rg needle . 2>/dev/null | head',
+		'cd ~ && timeout 100 rg needle . 2>/dev/null | head',
+		'echo before; timeout 50 rg needle .',
+		'echo before\ntimeout 50 rg needle .',
+		'gtimeout 50 rg needle .',
+		'/usr/bin/timeout 50 rg needle .',
+		'"timeout" 50 rg needle .',
+		"'timeout' 50 rg needle .",
+		'command timeout 50 rg needle .',
+		'command -v timeout; timeout 50 rg needle .',
+		'env LANG=C timeout 50 rg needle .',
+		'LANG=C timeout 50 rg needle .',
+		'if true; then timeout 50 rg needle .; fi',
+		'(timeout 50 rg needle .)',
+		'echo $(timeout 50 rg needle .)',
+		'echo `timeout 50 rg needle .`',
+		'2>/dev/null timeout 50 rg needle .',
+		': # pi-disable-find\nexport PATH="/shim:$PATH"\ntimeout 50 rg needle .',
+		"cat <<'EOF'\ntext\nEOF\ntimeout 50 rg needle .",
+	]) {
+		const input = { command, timeout: 120 };
+		const result = hook({ toolName: "bash", input, parentToolCallId: "codemode-1" });
+		assert.equal(result?.block, true, command);
+		assert.match(result.reason, /NOT executed/);
+		assert.match(result.reason, /No search was performed/);
+		assert.match(result.reason, /timeout.*parameter/);
+		assert.deepEqual(input, { command, timeout: 120 });
+	}
+});
+
+test("allows timeout as ordinary text, arguments, filenames and heredoc bodies", () => {
+	const hook = hooks().get("tool_call");
+	for (const command of [
+		'rg "timeout" .',
+		'rg timeout .',
+		'echo "timeout 50 rg needle ."',
+		"printf '%s' 'timeout 50 rg needle .'",
+		'echo "a; timeout 50 rg needle ."',
+		'# timeout 50 rg needle .\necho ok',
+		'echo ok # timeout 50 rg needle .',
+		'cat timeout',
+		'command -v timeout',
+		'command -V timeout',
+		'which timeout',
+		'echo ok > timeout',
+		'timeout_value=50; echo "$timeout_value"',
+		"cat <<'EOF'\ntimeout 50 rg needle .\nEOF\nrg timeout .",
+		'cat <<EOF\ntimeout 50 rg needle .\nEOF',
+		"cat <<-'EOF'\n\ttimeout 50 rg needle .\n\tEOF\necho ok",
+		"cat <<'A' <<'B'\ntimeout 1 cmd\nA\ntimeout 2 cmd\nB\necho ok",
+		"python3 -c 'timeout = 50; print(timeout)'",
+	]) {
+		assert.equal(hook({ toolName: "bash", input: { command, timeout: 120 } }), undefined, command);
+	}
+});
