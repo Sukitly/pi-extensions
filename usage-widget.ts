@@ -187,46 +187,71 @@ function normalizeCodexUsage(data: CodexUsageResponse): UsageResponse {
 	return { windows };
 }
 
-async function fetchAnthropicUsage(apiKey: string): Promise<UsageResponse | null> {
+function formatUsageError(error: unknown, apiKey?: string): string {
+	let message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+	if (error instanceof Error && error.cause instanceof Error) {
+		message += ` (${error.cause.message})`;
+	}
+	if (apiKey) message = message.split(apiKey).join("[redacted]");
+	message = message
+		.replace(/Bearer\s+[^\s"',;]+/gi, "Bearer [redacted]")
+		.replace(/sk-[\w-]+/g, "[redacted]")
+		.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	return message.length > 300 ? `${message.slice(0, 300)}…` : message;
+}
+
+async function requireUsageResponse(response: Response): Promise<unknown> {
+	if (!response.ok) {
+		let detail = "";
+		try {
+			detail = await response.text();
+			try {
+				const body = JSON.parse(detail);
+				const message = body?.error?.message ?? body?.message ?? body?.error;
+				if (typeof message === "string") detail = message;
+			} catch { /* Non-JSON error responses are useful too. */ }
+		} catch { /* Keep the HTTP status even if reading the body fails. */ }
+		throw new Error(`HTTP ${response.status} ${response.statusText}${detail ? `: ${detail}` : ""}`);
+	}
 	try {
-		const response = await fetch("https://api.anthropic.com/api/oauth/usage", {
-			method: "GET",
-			headers: {
-				Accept: "application/json",
-				"Content-Type": "application/json",
-				Authorization: `Bearer ${apiKey}`,
-				"anthropic-beta": "oauth-2025-04-20",
-			},
-			signal: AbortSignal.timeout(10000),
-		});
-		if (!response.ok) return null;
-		return normalizeAnthropicUsage((await response.json()) as AnthropicUsageResponse);
-	} catch {
-		return null;
+		return await response.json();
+	} catch (error) {
+		throw new Error("Invalid usage JSON response", { cause: error });
 	}
 }
 
-async function fetchCodexUsage(apiKey: string): Promise<UsageResponse | null> {
-	try {
-		const accountId = extractCodexAccountId(apiKey);
-		if (!accountId) return null;
-		const userAgent = typeof navigator !== "undefined" ? `pi (${navigator.platform || "unknown"})` : "pi";
-		const response = await fetch("https://chatgpt.com/backend-api/wham/usage", {
-			method: "GET",
-			headers: {
-				Accept: "*/*",
-				Authorization: `Bearer ${apiKey}`,
-				"chatgpt-account-id": accountId,
-				originator: "pi",
-				"User-Agent": userAgent,
-			},
-			signal: AbortSignal.timeout(10000),
-		});
-		if (!response.ok) return null;
-		return normalizeCodexUsage((await response.json()) as CodexUsageResponse);
-	} catch {
-		return null;
-	}
+async function fetchAnthropicUsage(apiKey: string): Promise<UsageResponse> {
+	const response = await fetch("https://api.anthropic.com/api/oauth/usage", {
+		method: "GET",
+		headers: {
+			Accept: "application/json",
+			"Content-Type": "application/json",
+			Authorization: `Bearer ${apiKey}`,
+			"anthropic-beta": "oauth-2025-04-20",
+		},
+		signal: AbortSignal.timeout(10000),
+	});
+	return normalizeAnthropicUsage((await requireUsageResponse(response)) as AnthropicUsageResponse);
+}
+
+async function fetchCodexUsage(apiKey: string): Promise<UsageResponse> {
+	const accountId = extractCodexAccountId(apiKey);
+	if (!accountId) throw new Error("Missing ChatGPT account ID in Codex credentials; please log in again");
+	const userAgent = typeof navigator !== "undefined" ? `pi (${navigator.platform || "unknown"})` : "pi";
+	const response = await fetch("https://chatgpt.com/backend-api/wham/usage", {
+		method: "GET",
+		headers: {
+			Accept: "*/*",
+			Authorization: `Bearer ${apiKey}`,
+			"chatgpt-account-id": accountId,
+			originator: "pi",
+			"User-Agent": userAgent,
+		},
+		signal: AbortSignal.timeout(10000),
+	});
+	return normalizeCodexUsage((await requireUsageResponse(response)) as CodexUsageResponse);
 }
 
 async function fetchUsage(provider: string, apiKey: string): Promise<UsageResponse | null> {
@@ -245,6 +270,7 @@ const MIN_REFRESH_GAP_MS = 3 * 60 * 1000;
 export default function (pi: ExtensionAPI) {
 	const usageCache = new Map<string, { data: UsageResponse; refreshedAt: number }>();
 	const usageRefreshes = new Map<string, Promise<void>>();
+	const usageErrors = new Map<string, string>();
 	let activeProvider: string | null = null;
 	let lifecycleToken = 0;
 
@@ -271,11 +297,18 @@ export default function (pi: ExtensionAPI) {
 
 	function showWidget(ctx: ExtensionContext, provider: string | null) {
 		const data = getCachedUsage(provider);
-		if (!data) return;
+		const error = provider ? usageErrors.get(provider) : undefined;
+		if (!data && !error) {
+			hideWidget(ctx);
+			return;
+		}
 		ignoreStaleContext(() => {
 			ctx.ui.setWidget(
 				WIDGET_ID,
-				(_tui, theme) => new Text(buildWidgetLine(data, theme), 0, 0),
+				(_tui, theme) => new Text([
+					data ? buildWidgetLine(data, theme) : "",
+					error ? theme.fg("error", `${provider} usage: ${data ? "refresh failed (stale data)" : "refresh failed"} — ${error}`) : "",
+				].filter(Boolean).join("\n"), 0, 0),
 				{ placement: "belowEditor" },
 			);
 		});
@@ -290,7 +323,7 @@ export default function (pi: ExtensionAPI) {
 	async function refreshUsage(ctx: ExtensionContext, provider: string | null, force = false) {
 		if (!provider || !supportsUsageWidget(provider)) return;
 		const cached = usageCache.get(provider);
-		if (!force && cached && Date.now() - cached.refreshedAt < MIN_REFRESH_GAP_MS) return;
+		if (!force && !usageErrors.has(provider) && cached && Date.now() - cached.refreshedAt < MIN_REFRESH_GAP_MS) return;
 		const existingRefresh = usageRefreshes.get(provider);
 		if (existingRefresh) {
 			await existingRefresh;
@@ -300,11 +333,17 @@ export default function (pi: ExtensionAPI) {
 		// Capture the registry before detaching: reading ctx after a reload can throw.
 		const modelRegistry = ctx.modelRegistry;
 		const refresh = (async () => {
-			const apiKey = await modelRegistry.getApiKeyForProvider(provider);
-			if (!apiKey) return;
-			const data = await fetchUsage(provider, apiKey);
-			if (data) {
-				usageCache.set(provider, { data, refreshedAt: Date.now() });
+			let apiKey: string | undefined;
+			try {
+				apiKey = await modelRegistry.getApiKeyForProvider(provider);
+				if (!apiKey) throw new Error("No API credentials available; please log in");
+				const data = await fetchUsage(provider, apiKey);
+				if (data) {
+					usageCache.set(provider, { data, refreshedAt: Date.now() });
+					usageErrors.delete(provider);
+				}
+			} catch (error) {
+				usageErrors.set(provider, formatUsageError(error, apiKey));
 			}
 		})();
 		usageRefreshes.set(provider, refresh);
@@ -324,8 +363,7 @@ export default function (pi: ExtensionAPI) {
 		void refreshUsage(ctx, provider, force)
 			.then(() => {
 				if (!isCurrent(token, provider)) return;
-				if (getCachedUsage(provider)) showWidget(ctx, provider);
-				else hideWidget(ctx);
+				showWidget(ctx, provider);
 			})
 			.catch(() => {
 				// Usage is best-effort; detached refreshes must not reject lifecycle work.
@@ -344,8 +382,7 @@ export default function (pi: ExtensionAPI) {
 		activeProvider = provider;
 
 		if (supportsUsageWidget(provider)) {
-			if (getCachedUsage(provider)) showWidget(ctx, provider);
-			else hideWidget(ctx);
+			showWidget(ctx, provider);
 			refreshInBackground(ctx, provider, token, true);
 		} else {
 			hideWidget(ctx);
@@ -369,8 +406,7 @@ export default function (pi: ExtensionAPI) {
 		activeProvider = provider;
 
 		if (supportsUsageWidget(provider)) {
-			if (getCachedUsage(provider)) showWidget(ctx, provider);
-			else hideWidget(ctx);
+			showWidget(ctx, provider);
 			refreshInBackground(ctx, provider, token);
 		} else {
 			hideWidget(ctx);
