@@ -8,25 +8,114 @@ const source = stripTypeScriptTypes(readFileSync(new URL("../usage-widget.ts", i
 	.replace(/^import .*;$/gm, "")
 	.replace("export default function", "return function");
 const codexKey = `header.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "account" } }))}.signature`;
-function harness({ provider = "anthropic", key = "sk-test-secret", fetch, credentials } = {}) {
+function harness({ provider = "anthropic", key = "sk-test-secret", fetch, credentials, oauth = false, hasUI = true } = {}) {
 	const handlers = new Map();
 	let widget = "";
 	const extension = new Function("Text", "fetch", source)(class { constructor(text) { this.text = text; } }, fetch);
 	extension({ on: (event, handler) => handlers.set(event, handler) });
 	const ctx = {
-		hasUI: true, model: { provider },
-		modelRegistry: { getApiKeyForProvider: credentials ?? (async () => key) },
+		hasUI, model: { provider },
+		modelRegistry: {
+			getApiKeyForProvider: credentials ?? (async () => key),
+			isUsingOAuth: () => oauth,
+		},
 		ui: { setWidget: (_id, factory) => { widget = factory ? factory({}, { fg: (_color, text) => text }).text : ""; } },
 	};
 	return {
 		get text() { return widget; },
+		setOAuth(value) { oauth = value; },
 		async emit(event = "session_start", data = {}) {
+			if (event === "model_select") ctx.model = data.model;
 			handlers.get(event)(data, ctx);
 			await new Promise(resolve => setImmediate(resolve));
 		},
 	};
 }
 const success = () => Response.json({ five_hour: { utilization: 25, resets_at: null } });
+
+test("native OpenAI subscription shows an unavailable notice without resolving or sending credentials", async () => {
+	let requests = 0;
+	let credentialReads = 0;
+	const h = harness({
+		provider: "openai", oauth: true,
+		credentials: async () => { credentialReads++; return codexKey; },
+		fetch: async () => { requests++; return success(); },
+	});
+	for (const [event, data] of [
+		["session_start", {}],
+		["agent_end", {}],
+		["model_select", { model: { provider: "openai" } }],
+	]) {
+		await h.emit(event, data);
+		assert.match(h.text, /OpenAI subscription: quota query unavailable/);
+		assert.match(h.text, /https:\/\/chatgpt\.com\/settings\/usage/);
+		assert.doesNotMatch(h.text, /refresh failed|\d+%|5h:|7d:/);
+	}
+	assert.equal(requests, 0);
+	assert.equal(credentialReads, 0);
+});
+
+test("OpenAI API keys and non-interactive sessions stay hidden without usage requests", async () => {
+	let requests = 0;
+	let credentialReads = 0;
+	for (const options of [{ oauth: false }, { oauth: true, hasUI: false }]) {
+		const h = harness({
+			provider: "openai", ...options,
+			credentials: async () => { credentialReads++; return codexKey; },
+			fetch: async () => { requests++; return success(); },
+		});
+		await h.emit();
+		await h.emit("agent_end");
+		await h.emit("model_select", { model: { provider: "openai" } });
+		assert.equal(h.text, "");
+	}
+	assert.equal(requests, 0);
+	assert.equal(credentialReads, 0);
+});
+
+test("model switching isolates native OpenAI notices from cached legacy Codex quota", async () => {
+	let requests = 0;
+	const h = harness({
+		provider: "openai-codex", key: codexKey, oauth: true,
+		fetch: async () => {
+			requests++;
+			return Response.json({ rate_limit: { primary_window: { used_percent: 37, reset_at: 0 } } });
+		},
+	});
+	await h.emit();
+	assert.match(h.text, /5h:.*37%/);
+	await h.emit("model_select", { model: { provider: "openai" } });
+	assert.match(h.text, /quota query unavailable/);
+	assert.doesNotMatch(h.text, /37%|5h:/);
+	await h.emit("model_select", { model: { provider: "unsupported" } });
+	assert.equal(h.text, "");
+	await h.emit("model_select", { model: { provider: "openai-codex" } });
+	assert.match(h.text, /5h:.*37%/);
+	assert.equal(requests, 1);
+});
+
+test("OpenAI notices follow OAuth login and logout without caching the auth mode", async () => {
+	const h = harness({ provider: "openai", oauth: true });
+	await h.emit();
+	assert.match(h.text, /quota query unavailable/);
+	h.setOAuth(false);
+	await h.emit("agent_end");
+	assert.equal(h.text, "");
+	h.setOAuth(true);
+	await h.emit("model_select", { model: { provider: "openai" } });
+	assert.match(h.text, /quota query unavailable/);
+});
+
+test("late Anthropic refresh cannot replace an OpenAI subscription notice", async () => {
+	let resolve;
+	const h = harness({ oauth: true, fetch: () => new Promise(r => { resolve = r; }) });
+	await h.emit();
+	await h.emit("model_select", { model: { provider: "openai" } });
+	resolve(success());
+	await new Promise(r => setImmediate(r));
+	assert.match(h.text, /quota query unavailable/);
+	assert.doesNotMatch(h.text, /25%/);
+});
 
 test("shows HTTP status and API message, redacts credentials and bounds terminal text", async () => {
 	const h = harness({ fetch: async () => Response.json({ error: { message: `denied sk-test-secret Bearer another-secret\n\u001b[31m${"x".repeat(500)}` } }, { status: 401, statusText: "Unauthorized" }) });

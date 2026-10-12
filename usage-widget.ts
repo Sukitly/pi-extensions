@@ -266,6 +266,10 @@ function supportsUsageWidget(provider: string | null | undefined): provider is "
 
 const WIDGET_ID = "provider-usage";
 const MIN_REFRESH_GAP_MS = 3 * 60 * 1000;
+// Direct ChatGPT OAuth has no supported quota API; WHAM only accepts legacy Codex credentials.
+// https://github.com/openai/sign-in-with-chatgpt-devkit/issues/3#issuecomment-5936080960
+const OPENAI_SUBSCRIPTION_USAGE_NOTICE =
+	"OpenAI subscription: quota query unavailable — https://chatgpt.com/settings/usage";
 
 export default function (pi: ExtensionAPI) {
 	const usageCache = new Map<string, { data: UsageResponse; refreshedAt: number }>();
@@ -296,6 +300,20 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function showWidget(ctx: ExtensionContext, provider: string | null) {
+		if (provider === "openai") {
+			ignoreStaleContext(() => {
+				const model = ctx.model;
+				const isSubscription = model?.provider === "openai" && ctx.modelRegistry.isUsingOAuth(model);
+				ctx.ui.setWidget(
+					WIDGET_ID,
+					isSubscription
+						? (_tui, theme) => new Text(theme.fg("dim", OPENAI_SUBSCRIPTION_USAGE_NOTICE), 0, 0)
+						: undefined,
+					{ placement: "belowEditor" },
+				);
+			});
+			return;
+		}
 		const data = getCachedUsage(provider);
 		const error = provider ? usageErrors.get(provider) : undefined;
 		if (!data && !error) {
@@ -381,11 +399,9 @@ export default function (pi: ExtensionAPI) {
 		const token = lifecycleToken;
 		activeProvider = provider;
 
+		showWidget(ctx, provider);
 		if (supportsUsageWidget(provider)) {
-			showWidget(ctx, provider);
 			refreshInBackground(ctx, provider, token, true);
-		} else {
-			hideWidget(ctx);
 		}
 	});
 
@@ -394,7 +410,9 @@ export default function (pi: ExtensionAPI) {
 		const provider = activeProvider;
 		const token = lifecycleToken;
 
-		if (supportsUsageWidget(provider)) {
+		if (provider === "openai") {
+			showWidget(ctx, provider);
+		} else if (supportsUsageWidget(provider)) {
 			refreshInBackground(ctx, provider, token);
 		}
 	});
@@ -405,11 +423,9 @@ export default function (pi: ExtensionAPI) {
 		const token = lifecycleToken;
 		activeProvider = provider;
 
+		showWidget(ctx, provider);
 		if (supportsUsageWidget(provider)) {
-			showWidget(ctx, provider);
 			refreshInBackground(ctx, provider, token);
-		} else {
-			hideWidget(ctx);
 		}
 	});
 }
