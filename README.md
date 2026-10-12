@@ -16,7 +16,7 @@ A small collection of extensions for [pi-coding-agent](https://github.com/badlog
 | `disable-find.ts` | Blocks agent Bash invocations of `find` and directs the agent to use `fd` or `rg` | Auto-runs for agent Bash tool calls | `fd` and `rg` in Pi's managed tool path |
 | `replace-pi-with-claude-code.ts` | Rewrites `pi` to `claude code` in the system prompt | Auto-runs before each agent start and before each provider request | None |
 | `read-url.ts` | Adds a `read_url` tool that reads public URLs as Markdown through Jina Reader | Agent calls `read_url` when it needs external docs | Optional `JINA_API_KEY` for authenticated Jina quota |
-| `usage-widget.ts` | Shows Anthropic or Codex usage bars for the active provider | Auto-runs on session start, model change, and after agent turns | Valid Anthropic OAuth or OpenAI Codex auth |
+| `usage-widget.ts` | Shows Anthropic/legacy Codex usage bars or an OpenAI subscription quota-unavailable notice | Auto-runs on session start, model change, and after agent turns | Anthropic OAuth, legacy OpenAI Codex auth, or OpenAI subscription OAuth |
 | `tps.ts` | Reports output tokens per second and token usage after each agent run | Auto-runs after agent turns | Interactive UI |
 | `fix-anthropic-thinking-block-drop.ts` | Reinjects signed thinking blocks that pi-ai drops, avoiding Anthropic `400` errors on Opus/Sonnet 4.8 | Auto-runs before each Anthropic provider request | Anthropic model with thinking enabled |
 
@@ -408,16 +408,17 @@ Limitations:
 
 ### `usage-widget.ts`
 
-Shows usage information for the active provider when supported.
+Shows usage information or an availability notice for the active provider.
 
-Supported providers:
+Handled providers:
 
-- `anthropic`
-- `openai-codex`
+- `anthropic`: subscription usage bars
+- `openai-codex`: legacy Codex subscription usage bars
+- `openai`: ChatGPT subscription OAuth shows a quota-unavailable notice and `https://chatgpt.com/settings/usage`; API-key authentication keeps the widget hidden
 
 Behavior:
 
-- Displays usage bars for primary and secondary windows
+- Displays usage bars for primary and secondary windows when quota data is available
 - Shows reset times
 - Computes a 7-day pace delta for Anthropic-style usage windows
 - Caches usage briefly to avoid excessive requests
@@ -430,7 +431,10 @@ Behavior:
 Data sources:
 
 - Anthropic: `https://api.anthropic.com/api/oauth/usage`
-- Codex: `https://chatgpt.com/backend-api/wham/usage`
+- Legacy Codex: `https://chatgpt.com/backend-api/wham/usage`
+- Native OpenAI subscription: no supported quota API; the widget makes no usage requests and does not resolve or refresh access tokens
+
+Pi added native OpenAI subscription sign-in in v0.99.0. Its direct OAuth tokens target `api.openai.com` and are rejected by the legacy ChatGPT usage endpoint. OpenAI [confirmed that quota reporting is not currently supported](https://github.com/openai/sign-in-with-chatgpt-devkit/issues/3#issuecomment-5936080960). The widget does not borrow another account's legacy Codex credentials, read browser cookies, or estimate remaining quota from local token counts. Native subscription limits may include app-specific allowances, so legacy plan quota is not a replacement. See OpenAI's [errors and recovery guidance](https://developers.openai.com/siwc/token-sharing-open-source/errors-and-recovery).
 
 Use it when:
 
@@ -480,7 +484,7 @@ Use it when:
 | `disable-find.ts` | Applies only to agent Bash tool calls. User-initiated `!` and `!!` Bash commands in Pi remain unrestricted. The extension fails to load if its dedicated shim or shared message file is missing. |
 | `replace-pi-with-claude-code.ts` | Only affects system prompt text (agent state and serialized provider payload), not UI labels, command names, or message content. |
 | `read-url.ts` | Reads public URLs through Jina Reader. Set `JINA_API_KEY` only if you want authenticated fallback after anonymous quota is exhausted. |
-| `usage-widget.ts` | Hidden when the active provider is unsupported or no usage data is available. |
+| `usage-widget.ts` | Hidden for unsupported providers and OpenAI API keys. Native OpenAI subscription OAuth shows a quota-unavailable notice; Anthropic/legacy Codex refresh failures show sanitized errors, retaining stale data when available. |
 | `tps.ts` | Requires an interactive UI and a completed agent run with output tokens. The reported rate includes tool execution time; cache-hit percentage is omitted when there are no prompt tokens. |
 | `fix-anthropic-thinking-block-drop.ts` | Workaround for a pi-ai thinking-block drop bug. Acts only on the `anthropic-messages` API and same-model turns. Remove once pi-ai keeps signed empty-text thinking blocks. |
 
