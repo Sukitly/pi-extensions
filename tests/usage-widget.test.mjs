@@ -180,3 +180,117 @@ test("late failures do not overwrite another provider or a shut down session", a
 		assert.equal(h.text, "");
 	}
 });
+
+const antigravityQuotaPayload = {
+	groups: [
+		{
+			displayName: "Gemini Models",
+			buckets: [
+				{
+					bucketId: "gemini-weekly",
+					displayName: "Weekly Limit Remaining",
+					window: "weekly",
+					resetTime: "2026-10-21T02:26:06Z",
+					remainingFraction: 0.77342427,
+				},
+				{
+					bucketId: "gemini-5h",
+					displayName: "Five Hour Limit Remaining",
+					window: "5h",
+					resetTime: "2026-10-14T12:26:06Z",
+					remainingFraction: 0.37902868,
+				},
+			],
+		},
+		{
+			displayName: "Claude and GPT models",
+			buckets: [
+				{
+					bucketId: "3p-weekly",
+					displayName: "Weekly Limit Remaining",
+					window: "weekly",
+					resetTime: "2026-10-21T06:01:23Z",
+					remainingFraction: 0.4792164,
+				},
+				{
+					bucketId: "3p-5h",
+					displayName: "Five Hour Limit Remaining",
+					window: "5h",
+					resetTime: "2026-10-14T11:01:23Z",
+					remainingFraction: 0,
+				},
+			],
+		},
+	],
+};
+
+test("antigravity shows gemini usage and switches to claude usage when model changes", async () => {
+	let requests = 0;
+	let lastUrl = "";
+	let lastHeaders = {};
+	const h = harness({
+		provider: "antigravity",
+		key: JSON.stringify({ token: "ya29.test-secret-token", projectId: "test-project" }),
+		fetch: async (url, options) => {
+			requests++;
+			lastUrl = url;
+			lastHeaders = options?.headers ?? {};
+			return Response.json(antigravityQuotaPayload);
+		},
+	});
+
+	await h.emit("session_start", { model: { id: "gemini-3.8-flash", provider: "antigravity" } });
+	assert.match(lastUrl, /retrieveUserQuotaSummary/);
+	assert.equal(lastHeaders.Authorization, "Bearer ya29.test-secret-token");
+	assert.match(lastHeaders["User-Agent"], /antigravity\/cli/);
+	assert.match(h.text, /5h:.*62%/);
+	assert.match(h.text, /7d:.*23%/);
+	assert.equal(requests, 1);
+
+	// Switch to Claude model in antigravity: should use cached groups without extra network call
+	await h.emit("model_select", { model: { id: "claude-sonnet-4-6", provider: "antigravity" } });
+	assert.match(h.text, /5h:.*100%/);
+	assert.match(h.text, /7d:.*52%/);
+	assert.equal(requests, 1);
+
+	// Switch back to Gemini model: should return to Gemini usage immediately
+	await h.emit("model_select", { model: { id: "gemini-3.7-flash", provider: "antigravity" } });
+	assert.match(h.text, /5h:.*62%/);
+	assert.match(h.text, /7d:.*23%/);
+	assert.equal(requests, 1);
+});
+
+test("antigravity retries fallback endpoints on network failure", async () => {
+	const calledUrls = [];
+	const h = harness({
+		provider: "antigravity",
+		key: "ya29.raw-token",
+		fetch: async (url) => {
+			calledUrls.push(url);
+			if (url.includes("daily-cloudcode-pa")) {
+				throw new TypeError("daily endpoint network error");
+			}
+			return Response.json(antigravityQuotaPayload);
+		},
+	});
+	await h.emit("session_start", { model: { id: "gemini-3.8-flash", provider: "antigravity" } });
+	assert.equal(calledUrls.length, 2);
+	assert.match(calledUrls[0], /daily-cloudcode-pa\.googleapis\.com/);
+	assert.match(calledUrls[1], /cloudcode-pa\.googleapis\.com/);
+	assert.match(h.text, /5h:.*62%/);
+});
+
+test("antigravity redacts ya29 tokens on subscription failure", async () => {
+	const token = "ya29.a0AWY7Ckm-secret12345";
+	const h = harness({
+		provider: "antigravity",
+		key: JSON.stringify({ token, projectId: "proj" }),
+		fetch: async () => Response.json({
+			error: { message: `denied ${token} Bearer ${token} license required (#3501)` },
+		}, { status: 403, statusText: "Forbidden" }),
+	});
+	await h.emit("session_start", { model: { id: "gemini-3.8-flash", provider: "antigravity" } });
+	assert.match(h.text, /antigravity usage: refresh failed.*HTTP 403 Forbidden.*license required/);
+	assert.match(h.text, /\[redacted\]/);
+	assert.doesNotMatch(h.text, new RegExp(token));
+});
