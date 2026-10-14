@@ -11,6 +11,7 @@ interface UsageWindow {
 
 interface UsageResponse {
 	windows: UsageWindow[];
+	groups?: Record<string, UsageWindow[]>;
 }
 
 interface AnthropicUsageBucket {
@@ -37,6 +38,26 @@ interface CodexRateLimit {
 
 interface CodexUsageResponse {
 	rate_limit?: CodexRateLimit | null;
+}
+
+interface AntigravityBucket {
+	bucketId?: string;
+	displayName?: string;
+	window?: string;
+	resetTime?: string;
+	description?: string;
+	remainingFraction?: number;
+}
+
+interface AntigravityGroup {
+	displayName?: string;
+	description?: string;
+	buckets?: AntigravityBucket[];
+}
+
+interface AntigravityQuotaResponse {
+	groups?: AntigravityGroup[];
+	description?: string;
 }
 
 function pad2(n: number): string {
@@ -187,15 +208,95 @@ function normalizeCodexUsage(data: CodexUsageResponse): UsageResponse {
 	return { windows };
 }
 
+function extractAntigravityToken(apiKey: string): string {
+	try {
+		const parsed = JSON.parse(apiKey) as { token?: unknown };
+		if (typeof parsed?.token === "string" && parsed.token.length > 0) {
+			return parsed.token;
+		}
+	} catch {
+		// Not JSON, treat as raw token.
+	}
+	return apiKey;
+}
+
+function normalizeAntigravityUsage(data: AntigravityQuotaResponse): UsageResponse {
+	const groupsRecord: Record<string, UsageWindow[]> = {};
+	const allWindows: UsageWindow[] = [];
+
+	for (const group of data.groups ?? []) {
+		const groupName = group.displayName ?? "";
+		const is3P = /claude|gpt|3p/i.test(groupName);
+		const groupKey = is3P ? "claude-gpt" : "gemini";
+		const groupWindows: UsageWindow[] = [];
+
+		for (const bucket of group.buckets ?? []) {
+			if (typeof bucket.remainingFraction !== "number" || !Number.isFinite(bucket.remainingFraction)) {
+				continue;
+			}
+			const clampedRemaining = Math.max(0, Math.min(1, bucket.remainingFraction));
+			const utilization = Math.max(0, Math.min(100, (1 - clampedRemaining) * 100));
+			const bucketId = (bucket.bucketId ?? "").toLowerCase();
+			const windowType = (bucket.window ?? "").toLowerCase();
+
+			let windowSeconds = FIVE_HOURS_SECONDS;
+			let label = "5h";
+
+			if (windowType === "weekly" || bucketId.includes("weekly") || bucketId.includes("7d")) {
+				windowSeconds = SEVEN_DAYS_SECONDS;
+				label = "7d";
+			} else if (windowType === "5h" || bucketId.includes("5h")) {
+				windowSeconds = FIVE_HOURS_SECONDS;
+				label = "5h";
+			} else if (bucket.window) {
+				label = bucket.window;
+			}
+
+			groupWindows.push({
+				label,
+				utilization,
+				resetsAt: bucket.resetTime ?? null,
+				windowSeconds,
+			});
+		}
+
+		groupWindows.sort((a, b) => a.windowSeconds - b.windowSeconds);
+		groupsRecord[groupKey] = groupWindows;
+		allWindows.push(...groupWindows);
+	}
+
+	const defaultWindows = groupsRecord["gemini"] ?? groupsRecord["claude-gpt"] ?? allWindows;
+	return {
+		windows: defaultWindows,
+		groups: groupsRecord,
+	};
+}
+
+function resolveUsageForModel(data: UsageResponse | null, modelId?: string): UsageResponse | null {
+	if (!data) return null;
+	if (!data.groups) return data;
+	const is3P = modelId ? /claude|gpt|3p/i.test(modelId) : false;
+	const groupKey = is3P ? "claude-gpt" : "gemini";
+	const selectedWindows = data.groups[groupKey] ?? data.windows;
+	return { windows: selectedWindows, groups: data.groups };
+}
+
 function formatUsageError(error: unknown, apiKey?: string): string {
 	let message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
 	if (error instanceof Error && error.cause instanceof Error) {
 		message += ` (${error.cause.message})`;
 	}
-	if (apiKey) message = message.split(apiKey).join("[redacted]");
+	if (apiKey) {
+		message = message.split(apiKey).join("[redacted]");
+		const token = extractAntigravityToken(apiKey);
+		if (token && token !== apiKey) {
+			message = message.split(token).join("[redacted]");
+		}
+	}
 	message = message
 		.replace(/Bearer\s+[^\s"',;]+/gi, "Bearer [redacted]")
 		.replace(/sk-[\w-]+/g, "[redacted]")
+		.replace(/ya29\.[a-zA-Z0-9_-]+/g, "[redacted]")
 		.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, " ")
 		.replace(/\s+/g, " ")
 		.trim();
@@ -254,14 +355,50 @@ async function fetchCodexUsage(apiKey: string): Promise<UsageResponse> {
 	return normalizeCodexUsage((await requireUsageResponse(response)) as CodexUsageResponse);
 }
 
+const ANTIGRAVITY_ENDPOINT_FALLBACKS = [
+	"https://daily-cloudcode-pa.googleapis.com",
+	"https://cloudcode-pa.googleapis.com",
+];
+
+async function fetchAntigravityUsage(apiKey: string): Promise<UsageResponse> {
+	const token = extractAntigravityToken(apiKey);
+	if (!token) throw new Error("Missing Antigravity access token; please log in again");
+
+	let lastError: unknown;
+	for (const endpoint of ANTIGRAVITY_ENDPOINT_FALLBACKS) {
+		try {
+			const response = await fetch(`${endpoint}/v1internal:retrieveUserQuotaSummary`, {
+				method: "POST",
+				headers: {
+					Accept: "application/json",
+					"Content-Type": "application/json",
+					Authorization: `Bearer ${token}`,
+					"User-Agent": "antigravity/cli/1.2.4 (aidev_client; os_type=linux; arch=amd64; cl=982146307; auth_method=consumer)",
+				},
+				body: "{}",
+				signal: AbortSignal.timeout(10000),
+			});
+			const data = (await requireUsageResponse(response)) as AntigravityQuotaResponse;
+			return normalizeAntigravityUsage(data);
+		} catch (error) {
+			lastError = error;
+			if (error instanceof Error && error.message.includes("403")) {
+				throw error;
+			}
+		}
+	}
+	throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
 async function fetchUsage(provider: string, apiKey: string): Promise<UsageResponse | null> {
 	if (provider === "anthropic") return fetchAnthropicUsage(apiKey);
 	if (provider === "openai-codex") return fetchCodexUsage(apiKey);
+	if (provider === "antigravity") return fetchAntigravityUsage(apiKey);
 	return null;
 }
 
-function supportsUsageWidget(provider: string | null | undefined): provider is "anthropic" | "openai-codex" {
-	return provider === "anthropic" || provider === "openai-codex";
+function supportsUsageWidget(provider: string | null | undefined): provider is "anthropic" | "openai-codex" | "antigravity" {
+	return provider === "anthropic" || provider === "openai-codex" || provider === "antigravity";
 }
 
 const WIDGET_ID = "provider-usage";
@@ -299,7 +436,7 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	function showWidget(ctx: ExtensionContext, provider: string | null) {
+	function showWidget(ctx: ExtensionContext, provider: string | null, modelId?: string) {
 		if (provider === "openai") {
 			ignoreStaleContext(() => {
 				const model = ctx.model;
@@ -314,7 +451,8 @@ export default function (pi: ExtensionAPI) {
 			});
 			return;
 		}
-		const data = getCachedUsage(provider);
+		const rawData = getCachedUsage(provider);
+		const data = resolveUsageForModel(rawData, modelId ?? ctx.model?.id);
 		const error = provider ? usageErrors.get(provider) : undefined;
 		if (!data && !error) {
 			hideWidget(ctx);
@@ -423,7 +561,7 @@ export default function (pi: ExtensionAPI) {
 		const token = lifecycleToken;
 		activeProvider = provider;
 
-		showWidget(ctx, provider);
+		showWidget(ctx, provider, event.model.id);
 		if (supportsUsageWidget(provider)) {
 			refreshInBackground(ctx, provider, token);
 		}
