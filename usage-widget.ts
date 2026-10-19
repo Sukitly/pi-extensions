@@ -60,6 +60,20 @@ interface AntigravityQuotaResponse {
 	description?: string;
 }
 
+interface OpenCodeGoWindow {
+	status?: string;
+	percent: number;
+	resetsAt?: string | null;
+}
+
+interface OpenCodeGoUsageResponse {
+	usage?: {
+		rolling?: OpenCodeGoWindow | null;
+		weekly?: OpenCodeGoWindow | null;
+		monthly?: OpenCodeGoWindow | null;
+	};
+}
+
 function pad2(n: number): string {
 	return n.toString().padStart(2, "0");
 }
@@ -68,6 +82,7 @@ const HOUR_SECONDS = 60 * 60;
 const DAY_SECONDS = 24 * HOUR_SECONDS;
 const FIVE_HOURS_SECONDS = 5 * HOUR_SECONDS;
 const SEVEN_DAYS_SECONDS = 7 * DAY_SECONDS;
+const THIRTY_DAYS_SECONDS = 30 * DAY_SECONDS;
 
 function formatWindowDuration(seconds: number): string {
 	if (seconds >= DAY_SECONDS && seconds % DAY_SECONDS === 0) return `${seconds / DAY_SECONDS}d`;
@@ -82,6 +97,9 @@ function formatResetTime(resetsAt: string | null, windowSeconds: number): string
 	if (!Number.isFinite(d.getTime())) return "";
 	const time = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 	if (windowSeconds < DAY_SECONDS) return time;
+	if (windowSeconds >= SEVEN_DAYS_SECONDS * 2) {
+		return `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${time}`;
+	}
 	const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 	return `${days[d.getDay()]} ${time}`;
 }
@@ -127,7 +145,7 @@ function renderUsageWindow(window: UsageWindow, theme: Theme): string {
 
 function buildWidgetLine(data: UsageResponse, theme: Theme): string {
 	if (data.windows.length === 0) return theme.fg("dim", "No usage data");
-	return data.windows.map((window) => renderUsageWindow(window, theme)).join(theme.fg("dim", "  ·  "));
+	return data.windows.map((window) => renderUsageWindow(window, theme)).join(theme.fg("dim", " • "));
 }
 
 function unixSecondsToIso(timestamp: number | null | undefined): string | null {
@@ -272,6 +290,39 @@ function normalizeAntigravityUsage(data: AntigravityQuotaResponse): UsageRespons
 	};
 }
 
+function normalizeOpenCodeGoUsage(data: OpenCodeGoUsageResponse): UsageResponse {
+	const windows: UsageWindow[] = [];
+	const usage = data?.usage;
+	if (!usage) return { windows };
+
+	if (usage.rolling && typeof usage.rolling.percent === "number" && Number.isFinite(usage.rolling.percent)) {
+		windows.push({
+			label: "5h",
+			utilization: usage.rolling.percent,
+			resetsAt: usage.rolling.resetsAt ?? null,
+			windowSeconds: FIVE_HOURS_SECONDS,
+		});
+	}
+	if (usage.weekly && typeof usage.weekly.percent === "number" && Number.isFinite(usage.weekly.percent)) {
+		windows.push({
+			label: "7d",
+			utilization: usage.weekly.percent,
+			resetsAt: usage.weekly.resetsAt ?? null,
+			windowSeconds: SEVEN_DAYS_SECONDS,
+		});
+	}
+	if (usage.monthly && typeof usage.monthly.percent === "number" && Number.isFinite(usage.monthly.percent)) {
+		windows.push({
+			label: "30d",
+			utilization: usage.monthly.percent,
+			resetsAt: usage.monthly.resetsAt ?? null,
+			windowSeconds: THIRTY_DAYS_SECONDS,
+		});
+	}
+
+	return { windows };
+}
+
 function resolveUsageForModel(data: UsageResponse | null, modelId?: string): UsageResponse | null {
 	if (!data) return null;
 	if (!data.groups) return data;
@@ -296,6 +347,7 @@ function formatUsageError(error: unknown, apiKey?: string): string {
 	message = message
 		.replace(/Bearer\s+[^\s"',;]+/gi, "Bearer [redacted]")
 		.replace(/sk-[\w-]+/g, "[redacted]")
+		.replace(/oc_sk_[\w-]+/g, "[redacted]")
 		.replace(/ya29\.[a-zA-Z0-9_-]+/g, "[redacted]")
 		.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, " ")
 		.replace(/\s+/g, " ")
@@ -390,15 +442,54 @@ async function fetchAntigravityUsage(apiKey: string): Promise<UsageResponse> {
 	throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
+const OPENCODE_GO_ENDPOINT_FALLBACKS = [
+	"https://opencode.ai/zen/go/v1/usage",
+	"https://opencode.ai/inference/go/v1/usage",
+];
+
+async function fetchOpenCodeGoUsage(apiKey: string): Promise<UsageResponse> {
+	if (!apiKey) throw new Error("Missing OpenCode Go API key; please configure credentials");
+
+	let lastError: unknown;
+	for (const endpoint of OPENCODE_GO_ENDPOINT_FALLBACKS) {
+		try {
+			const response = await fetch(endpoint, {
+				method: "GET",
+				headers: {
+					Accept: "application/json",
+					Authorization: `Bearer ${apiKey}`,
+				},
+				signal: AbortSignal.timeout(10000),
+			});
+			const data = (await requireUsageResponse(response)) as OpenCodeGoUsageResponse;
+			return normalizeOpenCodeGoUsage(data);
+		} catch (error) {
+			lastError = error;
+			if (error instanceof Error && (error.message.includes("401") || error.message.includes("403"))) {
+				throw error;
+			}
+		}
+	}
+	throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
 async function fetchUsage(provider: string, apiKey: string): Promise<UsageResponse | null> {
 	if (provider === "anthropic") return fetchAnthropicUsage(apiKey);
 	if (provider === "openai-codex") return fetchCodexUsage(apiKey);
 	if (provider === "antigravity") return fetchAntigravityUsage(apiKey);
+	if (provider === "opencode-go") return fetchOpenCodeGoUsage(apiKey);
 	return null;
 }
 
-function supportsUsageWidget(provider: string | null | undefined): provider is "anthropic" | "openai-codex" | "antigravity" {
-	return provider === "anthropic" || provider === "openai-codex" || provider === "antigravity";
+function supportsUsageWidget(
+	provider: string | null | undefined,
+): provider is "anthropic" | "openai-codex" | "antigravity" | "opencode-go" {
+	return (
+		provider === "anthropic" ||
+		provider === "openai-codex" ||
+		provider === "antigravity" ||
+		provider === "opencode-go"
+	);
 }
 
 const WIDGET_ID = "provider-usage";
