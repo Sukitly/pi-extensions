@@ -294,3 +294,85 @@ test("antigravity redacts ya29 tokens on subscription failure", async () => {
 	assert.match(h.text, /\[redacted\]/);
 	assert.doesNotMatch(h.text, new RegExp(token));
 });
+
+const opencodeGoUsagePayload = {
+	usage: {
+		rolling: {
+			status: "ok",
+			percent: 15,
+			resetsAt: "2026-10-19T10:47:30.000Z",
+		},
+		weekly: {
+			status: "ok",
+			percent: 42,
+			resetsAt: "2026-10-26T00:00:00.000Z",
+		},
+		monthly: {
+			status: "ok",
+			percent: 60,
+			resetsAt: "2026-11-19T05:36:40.000Z",
+		},
+	},
+};
+
+test("opencode-go shows 5h, 7d and 30d usage windows", async () => {
+	let requests = 0;
+	let lastUrl = "";
+	let lastHeaders = {};
+	const key = "oc_sk_90102cca9a62_testKey123456";
+	const h = harness({
+		provider: "opencode-go",
+		key,
+		fetch: async (url, options) => {
+			requests++;
+			lastUrl = url;
+			lastHeaders = options?.headers ?? {};
+			return Response.json(opencodeGoUsagePayload);
+		},
+	});
+
+	await h.emit("session_start", { model: { id: "claude-haiku-5-5", provider: "opencode-go" } });
+	assert.match(lastUrl, /opencode\.ai\/zen\/go\/v1\/usage/);
+	assert.equal(lastHeaders.Authorization, `Bearer ${key}`);
+	assert.match(h.text, /5h:.*15%/);
+	assert.match(h.text, /7d:.*42%/);
+	assert.match(h.text, /30d:.*60%/);
+	assert.equal(requests, 1);
+});
+
+test("opencode-go retries fallback endpoint on network failure", async () => {
+	const calledUrls = [];
+	const h = harness({
+		provider: "opencode-go",
+		key: "oc_sk_test",
+		fetch: async (url) => {
+			calledUrls.push(url);
+			if (url.includes("/zen/go/v1/usage")) {
+				throw new TypeError("zen endpoint network error");
+			}
+			return Response.json(opencodeGoUsagePayload);
+		},
+	});
+	await h.emit("session_start", { model: { id: "claude-haiku-5-5", provider: "opencode-go" } });
+	assert.equal(calledUrls.length, 2);
+	assert.match(calledUrls[0], /zen\/go\/v1\/usage/);
+	assert.match(calledUrls[1], /inference\/go\/v1\/usage/);
+	assert.match(h.text, /5h:.*15%/);
+	assert.match(h.text, /7d:.*42%/);
+	assert.match(h.text, /30d:.*60%/);
+});
+
+test("opencode-go redacts oc_sk_ tokens on failure", async () => {
+	const token = "oc_sk_90102cca9a62_secretToken";
+	const h = harness({
+		provider: "opencode-go",
+		key: token,
+		fetch: async () => Response.json({
+			error: { message: `invalid token ${token} Bearer ${token}` },
+		}, { status: 401, statusText: "Unauthorized" }),
+	});
+	await h.emit("session_start", { model: { id: "claude-haiku-5-5", provider: "opencode-go" } });
+	assert.match(h.text, /opencode-go usage: refresh failed.*HTTP 401 Unauthorized.*invalid token/);
+	assert.match(h.text, /\[redacted\]/);
+	assert.doesNotMatch(h.text, new RegExp(token));
+});
