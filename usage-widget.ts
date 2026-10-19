@@ -145,7 +145,7 @@ function renderUsageWindow(window: UsageWindow, theme: Theme): string {
 
 function buildWidgetLine(data: UsageResponse, theme: Theme): string {
 	if (data.windows.length === 0) return theme.fg("dim", "No usage data");
-	return data.windows.map((window) => renderUsageWindow(window, theme)).join(theme.fg("dim", "  ·  "));
+	return data.windows.map((window) => renderUsageWindow(window, theme)).join(theme.fg("dim", " • "));
 }
 
 function unixSecondsToIso(timestamp: number | null | undefined): string | null {
