@@ -60,18 +60,23 @@ interface AntigravityQuotaResponse {
 	description?: string;
 }
 
-interface OpenCodeGoWindow {
-	status?: string;
-	percent: number;
+interface OpenCodeGoMeter {
+	startsAt?: string | null;
 	resetsAt?: string | null;
+	limitMicroCents?: string | number | null;
+	usedMicroCents?: string | number | null;
 }
 
-interface OpenCodeGoUsageResponse {
-	usage?: {
-		rolling?: OpenCodeGoWindow | null;
-		weekly?: OpenCodeGoWindow | null;
-		monthly?: OpenCodeGoWindow | null;
-	};
+interface OpenCodeGoStatusResponse {
+	access?: {
+		startsAt?: string | null;
+		endsAt?: string | null;
+		meters?: {
+			fiveHour?: OpenCodeGoMeter | null;
+			week?: OpenCodeGoMeter | null;
+			month?: OpenCodeGoMeter | null;
+		} | null;
+	} | null;
 }
 
 function pad2(n: number): string {
@@ -290,36 +295,56 @@ function normalizeAntigravityUsage(data: AntigravityQuotaResponse): UsageRespons
 	};
 }
 
-function normalizeOpenCodeGoUsage(data: OpenCodeGoUsageResponse): UsageResponse {
+function parseMicroCents(value: string | number | null | undefined): number | null {
+	if (typeof value === "number") return Number.isFinite(value) ? value : null;
+	if (typeof value !== "string" || value.trim() === "") return null;
+	const parsed = Number(value);
+	return Number.isFinite(parsed) ? parsed : null;
+}
+
+function toOpenCodeGoWindow(
+	meter: OpenCodeGoMeter | null | undefined,
+	label: string,
+	fallbackStartsAt: string | null,
+	fallbackWindowSeconds: number,
+): UsageWindow | null {
+	if (!meter) return null;
+	const used = parseMicroCents(meter.usedMicroCents);
+	const limit = parseMicroCents(meter.limitMicroCents);
+	if (used === null || limit === null || limit <= 0) return null;
+
+	const resetsAt = meter.resetsAt ?? null;
+	const resetMs = resetsAt ? new Date(resetsAt).getTime() : Number.NaN;
+	const startsAt = meter.startsAt ?? fallbackStartsAt;
+	const startMs = startsAt ? new Date(startsAt).getTime() : Number.NaN;
+	const windowSeconds =
+		Number.isFinite(resetMs) && Number.isFinite(startMs) && resetMs > startMs
+			? (resetMs - startMs) / 1000
+			: fallbackWindowSeconds;
+
+	return {
+		label,
+		utilization: Math.min(100, Math.max(0, (used / limit) * 100)),
+		resetsAt,
+		windowSeconds,
+	};
+}
+
+function normalizeOpenCodeGoUsage(data: OpenCodeGoStatusResponse): UsageResponse {
+	const access = data?.access;
+	const meters = access?.meters;
+	if (!meters) return { windows: [] };
+
+	// Only the monthly meter omits startsAt; the subscription period start is its window start.
+	const periodStart = access?.startsAt ?? null;
 	const windows: UsageWindow[] = [];
-	const usage = data?.usage;
-	if (!usage) return { windows };
-
-	if (usage.rolling && typeof usage.rolling.percent === "number" && Number.isFinite(usage.rolling.percent)) {
-		windows.push({
-			label: "5h",
-			utilization: usage.rolling.percent,
-			resetsAt: usage.rolling.resetsAt ?? null,
-			windowSeconds: FIVE_HOURS_SECONDS,
-		});
+	for (const window of [
+		toOpenCodeGoWindow(meters.fiveHour, "5h", null, FIVE_HOURS_SECONDS),
+		toOpenCodeGoWindow(meters.week, "7d", null, SEVEN_DAYS_SECONDS),
+		toOpenCodeGoWindow(meters.month, "30d", periodStart, THIRTY_DAYS_SECONDS),
+	]) {
+		if (window) windows.push(window);
 	}
-	if (usage.weekly && typeof usage.weekly.percent === "number" && Number.isFinite(usage.weekly.percent)) {
-		windows.push({
-			label: "7d",
-			utilization: usage.weekly.percent,
-			resetsAt: usage.weekly.resetsAt ?? null,
-			windowSeconds: SEVEN_DAYS_SECONDS,
-		});
-	}
-	if (usage.monthly && typeof usage.monthly.percent === "number" && Number.isFinite(usage.monthly.percent)) {
-		windows.push({
-			label: "30d",
-			utilization: usage.monthly.percent,
-			resetsAt: usage.monthly.resetsAt ?? null,
-			windowSeconds: THIRTY_DAYS_SECONDS,
-		});
-	}
-
 	return { windows };
 }
 
@@ -362,7 +387,7 @@ async function requireUsageResponse(response: Response): Promise<unknown> {
 			detail = await response.text();
 			try {
 				const body = JSON.parse(detail);
-				const message = body?.error?.message ?? body?.message ?? body?.error;
+				const message = body?.error?.message ?? body?.message ?? body?.error ?? body?._tag;
 				if (typeof message === "string") detail = message;
 			} catch { /* Non-JSON error responses are useful too. */ }
 		} catch { /* Keep the HTTP status even if reading the body fails. */ }
@@ -442,35 +467,23 @@ async function fetchAntigravityUsage(apiKey: string): Promise<UsageResponse> {
 	throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
-const OPENCODE_GO_ENDPOINT_FALLBACKS = [
-	"https://opencode.ai/zen/go/v1/usage",
-	"https://opencode.ai/inference/go/v1/usage",
-];
+// The console status endpoint is what https://opencode.ai/console reads, so its meters match the
+// web UI exactly. The zen/inference `/go/v1/usage` variants truncate the same ratios to whole
+// percentages (0.91% becomes 0), which disagrees with the console.
+const OPENCODE_GO_STATUS_ENDPOINT = "https://opencode.ai/console/api/go/status";
 
 async function fetchOpenCodeGoUsage(apiKey: string): Promise<UsageResponse> {
 	if (!apiKey) throw new Error("Missing OpenCode Go API key; please configure credentials");
 
-	let lastError: unknown;
-	for (const endpoint of OPENCODE_GO_ENDPOINT_FALLBACKS) {
-		try {
-			const response = await fetch(endpoint, {
-				method: "GET",
-				headers: {
-					Accept: "application/json",
-					Authorization: `Bearer ${apiKey}`,
-				},
-				signal: AbortSignal.timeout(10000),
-			});
-			const data = (await requireUsageResponse(response)) as OpenCodeGoUsageResponse;
-			return normalizeOpenCodeGoUsage(data);
-		} catch (error) {
-			lastError = error;
-			if (error instanceof Error && (error.message.includes("401") || error.message.includes("403"))) {
-				throw error;
-			}
-		}
-	}
-	throw lastError instanceof Error ? lastError : new Error(String(lastError));
+	const response = await fetch(OPENCODE_GO_STATUS_ENDPOINT, {
+		method: "GET",
+		headers: {
+			Accept: "application/json",
+			Authorization: `Bearer ${apiKey}`,
+		},
+		signal: AbortSignal.timeout(10000),
+	});
+	return normalizeOpenCodeGoUsage((await requireUsageResponse(response)) as OpenCodeGoStatusResponse);
 }
 
 async function fetchUsage(provider: string, apiKey: string): Promise<UsageResponse | null> {

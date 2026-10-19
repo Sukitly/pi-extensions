@@ -414,6 +414,7 @@ Handled providers:
 
 - `anthropic`: subscription usage bars
 - `openai-codex`: legacy Codex subscription usage bars
+- `opencode-go`: OpenCode Go 5h / 7d / 30d usage bars
 - `openai`: ChatGPT subscription OAuth shows a quota-unavailable notice and `https://chatgpt.com/settings/usage`; API-key authentication keeps the widget hidden
 
 Behavior:
@@ -432,9 +433,12 @@ Data sources:
 
 - Anthropic: `https://api.anthropic.com/api/oauth/usage`
 - Legacy Codex: `https://chatgpt.com/backend-api/wham/usage`
+- OpenCode Go: `https://opencode.ai/console/api/go/status`, the same endpoint the console UI reads
 - Native OpenAI subscription: no supported quota API; the widget makes no usage requests and does not resolve or refresh access tokens
 
 Pi added native OpenAI subscription sign-in in v0.99.0. Its direct OAuth tokens target `api.openai.com` and are rejected by the legacy ChatGPT usage endpoint. OpenAI [confirmed that quota reporting is not currently supported](https://github.com/openai/sign-in-with-chatgpt-devkit/issues/3#issuecomment-5936080960). The widget does not borrow another account's legacy Codex credentials, read browser cookies, or estimate remaining quota from local token counts. Native subscription limits may include app-specific allowances, so legacy plan quota is not a replacement. See OpenAI's [errors and recovery guidance](https://developers.openai.com/siwc/token-sharing-open-source/errors-and-recovery).
+
+OpenCode Go meters are micro-cent integers, so percentages are computed as `usedMicroCents / limitMicroCents`. The older `https://opencode.ai/zen/go/v1/usage` endpoint returns the same ratios truncated to whole percentages (0.91% becomes `0`), which disagrees with the console, so the widget queries the status endpoint instead.
 
 Use it when:
 

@@ -295,27 +295,36 @@ test("antigravity redacts ya29 tokens on subscription failure", async () => {
 	assert.doesNotMatch(h.text, new RegExp(token));
 });
 
-const opencodeGoUsagePayload = {
-	usage: {
-		rolling: {
-			status: "ok",
-			percent: 15,
-			resetsAt: "2026-10-19T10:47:30.000Z",
-		},
-		weekly: {
-			status: "ok",
-			percent: 42,
-			resetsAt: "2026-10-26T00:00:00.000Z",
-		},
-		monthly: {
-			status: "ok",
-			percent: 60,
-			resetsAt: "2026-11-19T05:36:40.000Z",
+// Shape of https://opencode.ai/console/api/go/status, which the console UI reads.
+const opencodeGoStatusPayload = {
+	subscriberUserId: "acc_test",
+	product: "go",
+	access: {
+		startsAt: "2026-10-19T05:36:40.000Z",
+		endsAt: "2026-11-19T05:36:40.000Z",
+		meters: {
+			fiveHour: {
+				startsAt: "2026-10-19T05:47:30.000Z",
+				resetsAt: "2026-10-19T10:47:30.000Z",
+				limitMicroCents: "1200000000",
+				usedMicroCents: "21977365",
+			},
+			week: {
+				startsAt: "2026-10-19T00:00:00.000Z",
+				resetsAt: "2026-10-26T00:00:00.000Z",
+				limitMicroCents: "3000000000",
+				usedMicroCents: "21977365",
+			},
+			month: {
+				resetsAt: "2026-11-19T05:36:40.000Z",
+				limitMicroCents: "6000000000",
+				usedMicroCents: "21977365",
+			},
 		},
 	},
 };
 
-test("opencode-go shows 5h, 7d and 30d usage windows", async () => {
+test("opencode-go reads exact meters and matches the console rounding", async () => {
 	let requests = 0;
 	let lastUrl = "";
 	let lastHeaders = {};
@@ -327,52 +336,89 @@ test("opencode-go shows 5h, 7d and 30d usage windows", async () => {
 			requests++;
 			lastUrl = url;
 			lastHeaders = options?.headers ?? {};
-			return Response.json(opencodeGoUsagePayload);
+			return Response.json(opencodeGoStatusPayload);
 		},
 	});
 
 	await h.emit("session_start", { model: { id: "claude-haiku-5-5", provider: "opencode-go" } });
-	assert.match(lastUrl, /opencode\.ai\/zen\/go\/v1\/usage/);
+	assert.equal(lastUrl, "https://opencode.ai/console/api/go/status");
 	assert.equal(lastHeaders.Authorization, `Bearer ${key}`);
-	assert.match(h.text, /5h:.*15%/);
-	assert.match(h.text, /7d:.*42%/);
-	assert.match(h.text, /30d:.*60%/);
 	assert.equal(requests, 1);
+	// 21,977,365 / 1,200,000,000 = 1.83% -> 2%; /3,000,000,000 = 0.73% -> 1%; /6,000,000,000 = 0.37% -> 0%.
+	// The zen /go/v1/usage endpoint truncates these to 1%, 0% and 0%.
+	assert.match(h.text, /5h: \[[^\]]*\] 2%/);
+	assert.match(h.text, /7d: \[[^\]]*\] 1%/);
+	assert.match(h.text, /30d: \[[^\]]*\] 0%/);
 });
 
-test("opencode-go retries fallback endpoint on network failure", async () => {
+test("opencode-go uses one endpoint instead of retrying usage fallbacks", async () => {
 	const calledUrls = [];
 	const h = harness({
 		provider: "opencode-go",
-		key: "oc_sk_test",
+		key: "oc_sk_test_token",
 		fetch: async (url) => {
 			calledUrls.push(url);
-			if (url.includes("/zen/go/v1/usage")) {
-				throw new TypeError("zen endpoint network error");
-			}
-			return Response.json(opencodeGoUsagePayload);
+			return Response.json(opencodeGoStatusPayload);
 		},
 	});
 	await h.emit("session_start", { model: { id: "claude-haiku-5-5", provider: "opencode-go" } });
-	assert.equal(calledUrls.length, 2);
-	assert.match(calledUrls[0], /zen\/go\/v1\/usage/);
-	assert.match(calledUrls[1], /inference\/go\/v1\/usage/);
-	assert.match(h.text, /5h:.*15%/);
-	assert.match(h.text, /7d:.*42%/);
-	assert.match(h.text, /30d:.*60%/);
+	assert.deepEqual(calledUrls, ["https://opencode.ai/console/api/go/status"]);
 });
 
-test("opencode-go redacts oc_sk_ tokens on failure", async () => {
+test("opencode-go skips meters without usable limits and follows model changes", async () => {
+	let requests = 0;
+	const h = harness({
+		provider: "opencode-go",
+		key: "oc_sk_test_token",
+		fetch: async () => {
+			requests++;
+			return Response.json({
+				access: {
+					startsAt: "2026-10-19T05:36:40.000Z",
+					meters: {
+						fiveHour: {
+							startsAt: "2026-10-19T05:47:30.000Z",
+							resetsAt: "2026-10-19T10:47:30.000Z",
+							limitMicroCents: "1200000000",
+							usedMicroCents: "600000000",
+						},
+						week: { resetsAt: "2026-10-26T00:00:00.000Z", limitMicroCents: "0", usedMicroCents: "1" },
+						month: null,
+					},
+				},
+			});
+		},
+	});
+	await h.emit("session_start", { model: { id: "claude-haiku-5-5", provider: "opencode-go" } });
+	assert.match(h.text, /5h: \[[^\]]*\] 50%/);
+	assert.doesNotMatch(h.text, /7d:/);
+	assert.doesNotMatch(h.text, /30d:/);
+
+	await h.emit("model_select", { model: { id: "glm-4.6", provider: "opencode-go" } });
+	assert.match(h.text, /5h: \[[^\]]*\] 50%/);
+	assert.equal(requests, 1);
+});
+
+test("opencode-go redacts oc_sk_ tokens and surfaces the console error tag", async () => {
 	const token = "oc_sk_90102cca9a62_secretToken";
 	const h = harness({
 		provider: "opencode-go",
 		key: token,
-		fetch: async () => Response.json({
-			error: { message: `invalid token ${token} Bearer ${token}` },
-		}, { status: 401, statusText: "Unauthorized" }),
+		fetch: async () => Response.json({ _tag: "Unauthorized" }, { status: 401, statusText: "Unauthorized" }),
 	});
 	await h.emit("session_start", { model: { id: "claude-haiku-5-5", provider: "opencode-go" } });
-	assert.match(h.text, /opencode-go usage: refresh failed.*HTTP 401 Unauthorized.*invalid token/);
+	assert.match(h.text, /opencode-go usage: refresh failed.*HTTP 401 Unauthorized: Unauthorized/);
+	assert.doesNotMatch(h.text, new RegExp(token));
+});
+
+test("opencode-go redacts oc_sk_ tokens echoed by a failing console response", async () => {
+	const token = "oc_sk_90102cca9a62_secretToken";
+	const h = harness({
+		provider: "opencode-go",
+		key: token,
+		fetch: async () => Response.json({ _tag: `invalid token ${token} Bearer ${token}` }, { status: 403, statusText: "Forbidden" }),
+	});
+	await h.emit("session_start", { model: { id: "claude-haiku-5-5", provider: "opencode-go" } });
 	assert.match(h.text, /\[redacted\]/);
 	assert.doesNotMatch(h.text, new RegExp(token));
 });
