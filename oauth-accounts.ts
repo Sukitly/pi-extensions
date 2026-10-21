@@ -243,7 +243,13 @@ function extractIdentityFromToken(token: string): { email?: string; accountId?: 
 	return { email, accountId };
 }
 
+const profileCache = new Map<string, { email?: string; displayName?: string; uuid?: string }>();
+
 async function fetchAnthropicProfile(token: string): Promise<{ email?: string; displayName?: string; uuid?: string } | null> {
+	if (!token) return null;
+	const cached = profileCache.get(token);
+	if (cached) return cached;
+
 	try {
 		const response = await fetch("https://api.anthropic.com/api/oauth/profile", {
 			method: "GET",
@@ -252,15 +258,17 @@ async function fetchAnthropicProfile(token: string): Promise<{ email?: string; d
 				Authorization: `Bearer ${token}`,
 				"anthropic-beta": "oauth-2025-04-20",
 			},
-			signal: AbortSignal.timeout(8000),
+			signal: AbortSignal.timeout(6000),
 		});
 		if (!response.ok) return null;
 		const data = (await response.json()) as { account?: { email?: string; display_name?: string; uuid?: string } };
-		return {
+		const result = {
 			email: data.account?.email,
 			displayName: data.account?.display_name,
 			uuid: data.account?.uuid,
 		};
+		profileCache.set(token, result);
+		return result;
 	} catch {
 		return null;
 	}
@@ -646,6 +654,30 @@ export async function syncLiveToStore(): Promise<AccountsStore> {
 		for (const [providerId, rawCred] of Object.entries(auth)) {
 			if (!isOAuthCredential(rawCred)) continue;
 
+			// FAST-PATH: If this exact refresh token already exists in store, match immediately with zero network requests!
+			const providerAccounts = Object.values(store.accounts).filter((a) => a.provider === providerId);
+			const byRefresh = providerAccounts.find((a) => a.credential.refresh === rawCred.refresh);
+
+			if (byRefresh) {
+				if (store.activeAccounts[providerId] !== byRefresh.id) {
+					store.activeAccounts[providerId] = byRefresh.id;
+					modified = true;
+				}
+				if (
+					byRefresh.credential.access !== rawCred.access ||
+					byRefresh.credential.expires !== rawCred.expires
+				) {
+					byRefresh.credential = { ...byRefresh.credential, ...rawCred };
+					byRefresh.status = "valid";
+					byRefresh.statusError = undefined;
+					byRefresh.lastRefreshError = undefined;
+					byRefresh.lastUsedAt = Date.now();
+					modified = true;
+				}
+				continue;
+			}
+
+			// SLOW-PATH: Refresh token is new or changed. Resolve identity to distinguish new account vs rotation.
 			const isExplicitLogin = pendingLoginProvider === providerId || pendingLoginProvider === "__any__";
 			const liveIdentity = await resolveLiveIdentity(providerId, rawCred);
 			const liveStableKey = computeStableKey(providerId, liveIdentity);
@@ -1197,7 +1229,7 @@ async function runInteractiveMenu(ctx: ExtensionCommandContext): Promise<void> {
 
 async function runProviderAccountsMenu(ctx: ExtensionCommandContext, providerId: string): Promise<void> {
 	for (;;) {
-		const store = await syncLiveToStore();
+		const store = await loadAccountsStore();
 		const accounts = Object.values(store.accounts).filter((a) => a.provider === providerId);
 		const activeId = store.activeAccounts[providerId];
 
