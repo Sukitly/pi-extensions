@@ -479,7 +479,7 @@ test("concurrency: caretaker async network refresh does not clobber concurrent s
 		};
 
 		// Start Caretaker in background
-		const caretakerPromise = env.mod.runGlobalCaretaker(mockRegistry, { force: true });
+		const caretakerPromise = env.mod.runGlobalCaretaker(mockRegistry, { force: true, skipDelay: true });
 
 		// Immediately switch account from A to B while Caretaker is running
 		const switchResult = await env.mod.switchAccount(mockCtx, "acc-B");
@@ -571,6 +571,76 @@ test("getAccountUsageSummary does not call wham usage for native openai", async 
 		} finally {
 			globalThis.fetch = originalFetch;
 		}
+	} finally {
+		await env.cleanup();
+	}
+});
+
+test("anti-abuse: getAccountCaretakerThresholdMs produces staggered thresholds across accounts", async () => {
+	const env = await createTestEnv();
+	try {
+		const acc1 = { id: "anthropic-acc-1", provider: "anthropic" };
+		const acc2 = { id: "anthropic-acc-2", provider: "anthropic" };
+		const t1 = env.mod.getAccountCaretakerThresholdMs(acc1);
+		const t2 = env.mod.getAccountCaretakerThresholdMs(acc2);
+
+		assert.ok(t1 >= 2.5 * 3600 * 1000 && t1 <= 4.5 * 3600 * 1000);
+		assert.ok(t2 >= 2.5 * 3600 * 1000 && t2 <= 4.5 * 3600 * 1000);
+		assert.notEqual(t1, t2, "Thresholds must be staggered across accounts");
+	} finally {
+		await env.cleanup();
+	}
+});
+
+test("anti-abuse: circuit breaker trips on 429 and pauses subsequent accounts for same provider", async () => {
+	const env = await createTestEnv();
+	try {
+		const acc1 = {
+			id: "anthropic-1",
+			alias: "acc-1",
+			provider: "anthropic",
+			credential: { type: "oauth", access: "a1", refresh: "r1", expires: Date.now() + 1000 },
+			status: "valid",
+			addedAt: Date.now(),
+			lastUsedAt: Date.now(),
+		};
+		const acc2 = {
+			id: "anthropic-2",
+			alias: "acc-2",
+			provider: "anthropic",
+			credential: { type: "oauth", access: "a2", refresh: "r2", expires: Date.now() + 1000 },
+			status: "valid",
+			addedAt: Date.now(),
+			lastUsedAt: Date.now(),
+		};
+
+		await env.writeStore({
+			version: 1,
+			activeAccounts: {},
+			accounts: { "anthropic-1": acc1, "anthropic-2": acc2 },
+		});
+		await env.writeAuth({});
+
+		let attempts = 0;
+		const mockRegistry = {
+			getProvider: () => ({
+				auth: {
+					oauth: {
+						refresh: async () => {
+							attempts++;
+							throw new Error("HTTP 429 Too Many Requests: Rate limit exceeded");
+						},
+					},
+				},
+			}),
+		};
+
+		const report = await env.mod.runGlobalCaretaker(mockRegistry, { force: true, skipDelay: true });
+
+		// acc1 hit 429; acc2 must be skipped by circuit breaker!
+		assert.equal(attempts, 1, "Only first account should attempt network call before breaker trips");
+		assert.equal(report.failed.length, 2);
+		assert.match(report.failed[1], /circuit breaker/i);
 	} finally {
 		await env.cleanup();
 	}
