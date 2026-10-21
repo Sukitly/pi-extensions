@@ -1103,11 +1103,6 @@ async function runProviderAccountsMenu(ctx: ExtensionCommandContext, providerId:
 					description: formatAccountItemDescription(acc, cachedUsage),
 				});
 			}
-			items.push({
-				label: "← Back",
-				value: "action:back",
-				description: "Return to provider list",
-			});
 			return items;
 		};
 
@@ -1137,7 +1132,7 @@ async function runProviderAccountsMenu(ctx: ExtensionCommandContext, providerId:
 			}
 		});
 
-		if (!selected || selected === "action:back") return;
+		if (!selected) return;
 
 		if (selected.startsWith("acc:")) {
 			const accId = selected.slice("acc:".length);
@@ -1175,14 +1170,9 @@ async function runAccountActionMenu(ctx: ExtensionCommandContext, account: Store
 		value: "delete",
 		description: isActive ? "Log out and remove this active account" : "Remove this account from the pool",
 	});
-	actions.push({
-		label: "← Back",
-		value: "back",
-		description: "Return to accounts list",
-	});
 
 	const choice = await showCustomSelect(ctx, `Account: ${account.provider} / ${account.alias}`, actions);
-	if (!choice || choice === "back") return;
+	if (!choice) return;
 
 	if (choice === "switch") {
 		const res = await switchAccount(ctx, account.id);
