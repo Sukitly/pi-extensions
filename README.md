@@ -17,6 +17,7 @@ A small collection of extensions for [pi-coding-agent](https://github.com/badlog
 | `replace-pi-with-claude-code.ts` | Rewrites `pi` to `claude code` in the system prompt | Auto-runs before each agent start and before each provider request | None |
 | `read-url.ts` | Adds a `read_url` tool that reads public URLs as Markdown through Jina Reader | Agent calls `read_url` when it needs external docs | Optional `JINA_API_KEY` for authenticated Jina quota |
 | `usage-widget.ts` | Shows Anthropic/legacy Codex usage bars or an OpenAI subscription quota-unavailable notice | Auto-runs on session start, model change, and after agent turns | Anthropic OAuth, legacy OpenAI Codex auth, or OpenAI subscription OAuth |
+| `oauth-accounts.ts` | Manages and switches multiple OAuth credentials per provider with background keep-alive | Run `/accounts` | Interactive UI |
 | `tps.ts` | Reports output tokens per second and token usage after each agent run | Auto-runs after agent turns | Interactive UI |
 | `fix-anthropic-thinking-block-drop.ts` | Reinjects signed thinking blocks that pi-ai drops, avoiding Anthropic `400` errors on Opus/Sonnet 4.8 | Auto-runs before each Anthropic provider request | Anthropic model with thinking enabled |
 
@@ -40,6 +41,7 @@ chmod +x ~/.pi/agent/extensions/blocked-commands/find/find
 cp replace-pi-with-claude-code.ts ~/.pi/agent/extensions/
 cp read-url.ts ~/.pi/agent/extensions/
 cp usage-widget.ts ~/.pi/agent/extensions/
+cp oauth-accounts.ts ~/.pi/agent/extensions/
 cp tps.ts ~/.pi/agent/extensions/
 cp fix-anthropic-thinking-block-drop.ts ~/.pi/agent/extensions/
 ```
@@ -116,6 +118,25 @@ Backup list:
 Action menu:
 
 ![auth-backup actions screenshot](assets/auth-backup-actions.png)
+
+### `oauth-accounts.ts`
+
+Manages multiple OAuth accounts per provider (Anthropic, OpenAI Codex, Kimi, xAI, etc.) with pre-emptive background keep-alive.
+
+Behavior:
+
+- Automatically adopts existing and newly logged-in OAuth credentials from `~/.pi/agent/auth.json` into an isolated, permission-protected store (`~/.pi/agent/oauth-accounts.json`)
+- Adds a single command: `/accounts`
+- Supports switching accounts per provider without affecting other providers
+- Background Caretaker: periodically refreshes dormant tokens to prevent inactivity expiration and revocation
+- Safe switch: performs pre-flight refresh and waits for idle before swapping live credentials
+- Protects active credentials from overwrite when an account's token has expired or been revoked
+
+Run its tests with:
+
+```bash
+NODE_PATH=~/.pi/agent/install/releases/1.3.0/node_modules node --test tests/oauth-accounts.test.mjs
+```
 
 ### `branch-pr-widget.ts`
 
