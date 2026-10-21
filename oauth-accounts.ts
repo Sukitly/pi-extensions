@@ -273,6 +273,48 @@ export function computeStableKey(provider: string, identity: { uuid?: string; ac
 	return undefined;
 }
 
+export function getAccountCaretakerThresholdMs(account: StoredAccount): number {
+	const BASE_THRESHOLD_MS = 2.5 * 60 * 60 * 1000; // 2.5 hours
+	const MAX_JITTER_MS = 2 * 60 * 60 * 1000; // up to 2 hours
+	let hash = 0;
+	for (let i = 0; i < account.id.length; i++) {
+		hash = ((hash << 5) - hash + account.id.charCodeAt(i)) | 0;
+	}
+	const ratio = Math.abs(hash % 1000) / 1000;
+	return BASE_THRESHOLD_MS + ratio * MAX_JITTER_MS;
+}
+
+export function isRateLimitError(error: unknown): boolean {
+	const msg = String(error instanceof Error ? error.message : error).toLowerCase();
+	return (
+		msg.includes("429") ||
+		msg.includes("rate limit") ||
+		msg.includes("too many requests") ||
+		msg.includes("slow_down")
+	);
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+	if (ms <= 0) return Promise.resolve();
+	return new Promise((resolve) => {
+		if (signal?.aborted) return resolve();
+		const timer = setTimeout(resolve, ms);
+		signal?.addEventListener(
+			"abort",
+			() => {
+				clearTimeout(timer);
+				resolve();
+			},
+			{ once: true },
+		);
+	});
+}
+
+function randomJitterMs(minSeconds = 6, maxSeconds = 15): number {
+	const s = minSeconds + Math.random() * (maxSeconds - minSeconds);
+	return Math.round(s * 1000);
+}
+
 export function isFatalOAuthError(error: unknown): boolean {
 	const msg = String(error instanceof Error ? error.message : error).toLowerCase();
 	return (
@@ -675,7 +717,7 @@ async function refreshSingleAccount(
  */
 export async function runGlobalCaretaker(
 	modelRegistry: any,
-	options: { force?: boolean; signal?: AbortSignal } = {},
+	options: { force?: boolean; signal?: AbortSignal; skipDelay?: boolean } = {},
 ): Promise<{ refreshed: string[]; failed: string[]; skipped: string[] }> {
 	if (isCaretakerRunning) {
 		return { refreshed: [], failed: [], skipped: [] };
@@ -685,6 +727,8 @@ export async function runGlobalCaretaker(
 	const refreshed: string[] = [];
 	const failed: string[] = [];
 	const skipped: string[] = [];
+	const trippedProviders = new Set<string>();
+	const lastRefreshByProvider = new Map<string, number>();
 
 	try {
 		const initialStore = await syncLiveToStore();
@@ -692,18 +736,39 @@ export async function runGlobalCaretaker(
 		for (const accountSnapshot of Object.values(initialStore.accounts)) {
 			if (options.signal?.aborted) break;
 
+			// Circuit breaker: if previous account hit rate limit, stop hitting this provider
+			if (trippedProviders.has(accountSnapshot.provider)) {
+				failed.push(`${accountSnapshot.provider}/${accountSnapshot.alias}: Rate limit circuit breaker active; skipped.`);
+				continue;
+			}
+
+			const thresholdMs = getAccountCaretakerThresholdMs(accountSnapshot);
 			const expiresSoon =
 				options.force ||
-				Date.now() + CARETAKER_REFRESH_THRESHOLD_MS >= accountSnapshot.credential.expires;
+				Date.now() + thresholdMs >= accountSnapshot.credential.expires;
 
 			if (!expiresSoon) {
 				skipped.push(accountSnapshot.alias);
 				continue;
 			}
 
+			// Anti-burst jitter: if another account for the same provider was already refreshed in this pass,
+			// insert randomized delay (6-15s) to avoid multi-account burst detection
+			if (!options.skipDelay && lastRefreshByProvider.has(accountSnapshot.provider)) {
+				const delayMs = randomJitterMs(6, 15);
+				await sleep(delayMs, options.signal);
+				if (options.signal?.aborted) break;
+			}
+
+			lastRefreshByProvider.set(accountSnapshot.provider, Date.now());
+
 			// Perform network refresh outside store lock
 			const timeoutSignal = AbortSignal.any([AbortSignal.timeout(15000), options.signal ?? AbortSignal.timeout(30000)]);
 			const result = await refreshSingleAccount(accountSnapshot, modelRegistry, timeoutSignal);
+
+			if (!result.success && isRateLimitError(result.error)) {
+				trippedProviders.add(accountSnapshot.provider);
+			}
 
 			// Commit result with lock
 			await storeLock.run(async () => {
