@@ -530,6 +530,31 @@ export async function getAccountUsageSummary(account: StoredAccount): Promise<st
 // Core Synchronization & Switch Logic
 // ============================================================================
 
+export async function resolveLiveIdentity(
+	providerId: string,
+	credential: OAuthCredentialPayload,
+): Promise<{ email?: string; accountId?: string; uuid?: string }> {
+	const fromJwt = extractIdentityFromToken(credential.access);
+	let email = fromJwt.email;
+	let accountId = fromJwt.accountId;
+	let uuid: string | undefined;
+
+	if (providerId === "anthropic") {
+		const prof = await fetchAnthropicProfile(credential.access);
+		if (prof) {
+			if (prof.email) email = prof.email;
+			if (prof.uuid) uuid = prof.uuid;
+		}
+	} else if (providerId === "antigravity") {
+		const credEmail = (credential as any).email || (credential as any).accountId;
+		if (typeof credEmail === "string" && credEmail.includes("@")) {
+			email = credEmail;
+		}
+	}
+
+	return { email, accountId, uuid };
+}
+
 /**
  * Finds which account an incoming live credential belongs to.
  * Matches by:
@@ -557,6 +582,10 @@ function matchAccountForCredential(
 		const byStableKey = providerAccounts.find((a) => a.stableKey === liveStableKey);
 		if (byStableKey) return byStableKey;
 	}
+	if (liveIdentity.uuid) {
+		const byUuid = providerAccounts.find((a) => a.stableKey?.includes(`uuid:${liveIdentity.uuid}`));
+		if (byUuid) return byUuid;
+	}
 	if (liveIdentity.accountId) {
 		const byAccountId = providerAccounts.find((a) => a.accountId === liveIdentity.accountId);
 		if (byAccountId) return byAccountId;
@@ -568,32 +597,36 @@ function matchAccountForCredential(
 		if (byEmail) return byEmail;
 	}
 
-	// 3. If NOT an explicit /login, check if it is a rotated token for the active account
-	if (!isExplicitLogin) {
-		const activeId = store.activeAccounts[providerId];
-		const activeAcc = activeId ? store.accounts[activeId] : undefined;
-		if (activeAcc) {
-			// If activeAcc already has an identity, and live identity is different -> definitely different account!
-			if (activeAcc.email && liveIdentity.email && activeAcc.email.toLowerCase() !== liveIdentity.email.toLowerCase()) {
-				return undefined;
-			}
-			if (activeAcc.accountId && liveIdentity.accountId && activeAcc.accountId !== liveIdentity.accountId) {
-				return undefined;
-			}
-			if (activeAcc.stableKey && liveStableKey && activeAcc.stableKey !== liveStableKey) {
-				return undefined;
-			}
+	// If explicit /login occurred, and it didn't match any existing account by token or identity,
+	// it is definitely a NEW account!
+	if (isExplicitLogin) {
+		return undefined;
+	}
 
-			// Ensure it doesn't conflict with another known account's email/accountId
-			const conflictsOther = providerAccounts.some(
-				(a) =>
-					a.id !== activeAcc.id &&
-					((liveIdentity.email && a.email?.toLowerCase() === liveIdentity.email.toLowerCase()) ||
-						(liveIdentity.accountId && a.accountId === liveIdentity.accountId)),
-			);
-			if (!conflictsOther) {
-				return activeAcc;
-			}
+	// 3. If NOT an explicit /login, check if it is a rotated token for the active account
+	const activeId = store.activeAccounts[providerId];
+	const activeAcc = activeId ? store.accounts[activeId] : undefined;
+	if (activeAcc) {
+		// If activeAcc already has an identity, and live identity is different -> definitely different account!
+		if (activeAcc.email && liveIdentity.email && activeAcc.email.toLowerCase() !== liveIdentity.email.toLowerCase()) {
+			return undefined;
+		}
+		if (activeAcc.accountId && liveIdentity.accountId && activeAcc.accountId !== liveIdentity.accountId) {
+			return undefined;
+		}
+		if (activeAcc.stableKey && liveStableKey && activeAcc.stableKey !== liveStableKey) {
+			return undefined;
+		}
+
+		// Ensure it doesn't conflict with another known account's email/accountId
+		const conflictsOther = providerAccounts.some(
+			(a) =>
+				a.id !== activeAcc.id &&
+				((liveIdentity.email && a.email?.toLowerCase() === liveIdentity.email.toLowerCase()) ||
+					(liveIdentity.accountId && a.accountId === liveIdentity.accountId)),
+		);
+		if (!conflictsOther) {
+			return activeAcc;
 		}
 	}
 
@@ -613,8 +646,9 @@ export async function syncLiveToStore(): Promise<AccountsStore> {
 		for (const [providerId, rawCred] of Object.entries(auth)) {
 			if (!isOAuthCredential(rawCred)) continue;
 
-			const isExplicitLogin = pendingLoginProvider === providerId;
-			const liveIdentity = extractIdentityFromToken(rawCred.access);
+			const isExplicitLogin = pendingLoginProvider === providerId || pendingLoginProvider === "__any__";
+			const liveIdentity = await resolveLiveIdentity(providerId, rawCred);
+			const liveStableKey = computeStableKey(providerId, liveIdentity);
 			const matched = matchAccountForCredential(store, providerId, rawCred, liveIdentity, isExplicitLogin);
 
 			if (matched) {
@@ -633,6 +667,18 @@ export async function syncLiveToStore(): Promise<AccountsStore> {
 					matched.statusError = undefined;
 					matched.lastRefreshError = undefined;
 					matched.lastUsedAt = Date.now();
+					modified = true;
+				}
+				if (!matched.email && liveIdentity.email) {
+					matched.email = liveIdentity.email;
+					modified = true;
+				}
+				if (!matched.stableKey && liveStableKey) {
+					matched.stableKey = liveStableKey;
+					modified = true;
+				}
+				if (matched.alias.endsWith("-default") && liveIdentity.email) {
+					matched.alias = liveIdentity.email;
 					modified = true;
 				}
 				if (isExplicitLogin) {
@@ -1347,7 +1393,7 @@ export default function (pi: ExtensionAPI) {
 		if (text.startsWith("/login")) {
 			await syncLiveToStore().catch(() => {});
 			const parts = text.split(/\s+/);
-			pendingLoginProvider = parts[1]?.toLowerCase() || null;
+			pendingLoginProvider = parts[1]?.toLowerCase() || "__any__";
 		}
 	});
 
