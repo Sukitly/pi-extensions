@@ -1004,7 +1004,12 @@ export async function switchAccount(
 			await (ctx as any).modelRegistry?.refresh?.();
 		} catch {}
 
-		return { ok: true, message: `Switched ${providerId} to "${target.alias}"${warningNote}.` };
+		const displayAccount = target.email && target.alias !== target.email
+			? `${target.alias} (${target.email})`
+			: (target.email || target.alias);
+		lastKnownActiveAccountByProvider.set(providerId, target.id);
+
+		return { ok: true, message: `Account: ${displayAccount}${warningNote}` };
 	});
 }
 
@@ -1409,7 +1414,34 @@ function printAccountList(store: AccountsStore): string[] {
 // Extension Lifecycle & Registration
 // ============================================================================
 
+const lastKnownActiveAccountByProvider = new Map<string, string>();
+
 export default function (pi: ExtensionAPI) {
+	// When another window switches the account on disk, notify the user on turn start
+	pi.on("turn_start", async (_event, ctx) => {
+		try {
+			const store = await syncLiveToStore();
+			const activeModel = (ctx as any).model;
+			const provider = activeModel?.provider;
+			if (provider) {
+				const currentActiveId = store.activeAccounts[provider];
+				const prevActiveId = lastKnownActiveAccountByProvider.get(provider);
+				if (currentActiveId && prevActiveId && currentActiveId !== prevActiveId) {
+					const acc = store.accounts[currentActiveId];
+					if (acc) {
+						const displayAccount = acc.email && acc.alias !== acc.email
+							? `${acc.alias} (${acc.email})`
+							: (acc.email || acc.alias);
+						ctx.ui?.notify(`Account: ${displayAccount}`);
+					}
+				}
+				if (currentActiveId) {
+					lastKnownActiveAccountByProvider.set(provider, currentActiveId);
+				}
+			}
+		} catch {}
+	});
+
 	// Sync live tokens on turn_end and agent_end to capture in-flight token rotations
 	pi.on("turn_end", async () => {
 		await syncLiveToStore().catch(() => {});
@@ -1432,7 +1464,10 @@ export default function (pi: ExtensionAPI) {
 	// Auto-sync on session start and launch background caretaker
 	pi.on("session_start", async (_event, ctx) => {
 		try {
-			await syncLiveToStore();
+			const store = await syncLiveToStore();
+			for (const [prov, accId] of Object.entries(store.activeAccounts)) {
+				lastKnownActiveAccountByProvider.set(prov, accId);
+			}
 		} catch {}
 
 		void runGlobalCaretaker((ctx as any).modelRegistry).catch(() => {});

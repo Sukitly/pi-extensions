@@ -222,6 +222,7 @@ test("switchAccount switches active account in auth.json, waits for idle, and pr
 
 		const res = await env.mod.switchAccount(mockCtx, "anthropic-B");
 		assert.equal(res.ok, true);
+		assert.equal(res.message, "Account: personal");
 		assert.equal(waitedForIdle, true, "Must call waitForIdle before switching");
 
 		const auth = await env.readAuth();
