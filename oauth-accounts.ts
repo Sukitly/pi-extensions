@@ -1227,12 +1227,13 @@ async function runInteractiveMenu(ctx: ExtensionCommandContext): Promise<void> {
 
 		if (selectedAction.startsWith("provider:")) {
 			const providerId = selectedAction.slice("provider:".length);
-			await runProviderAccountsMenu(ctx, providerId);
+			const res = await runProviderAccountsMenu(ctx, providerId);
+			if (res === "exit") return;
 		}
 	}
 }
 
-async function runProviderAccountsMenu(ctx: ExtensionCommandContext, providerId: string): Promise<void> {
+async function runProviderAccountsMenu(ctx: ExtensionCommandContext, providerId: string): Promise<"exit" | void> {
 	for (;;) {
 		const store = await loadAccountsStore();
 		const accounts = Object.values(store.accounts).filter((a) => a.provider === providerId);
@@ -1286,12 +1287,13 @@ async function runProviderAccountsMenu(ctx: ExtensionCommandContext, providerId:
 			const accId = selected.slice("acc:".length);
 			const acc = store.accounts[accId];
 			if (!acc) continue;
-			await runAccountActionMenu(ctx, acc);
+			const res = await runAccountActionMenu(ctx, acc);
+			if (res === "exit") return "exit";
 		}
 	}
 }
 
-async function runAccountActionMenu(ctx: ExtensionCommandContext, account: StoredAccount): Promise<void> {
+async function runAccountActionMenu(ctx: ExtensionCommandContext, account: StoredAccount): Promise<"exit" | void> {
 	const store = await loadAccountsStore();
 	const isActive = store.activeAccounts[account.provider] === account.id;
 
@@ -1325,7 +1327,8 @@ async function runAccountActionMenu(ctx: ExtensionCommandContext, account: Store
 	if (choice === "switch") {
 		const res = await switchAccount(ctx, account.id);
 		if (res.ok) {
-			ctx.ui.notify(res.message, "info");
+			ctx.ui.notify(res.message);
+			return "exit";
 		} else {
 			ctx.ui.notify(res.message, "error");
 		}
