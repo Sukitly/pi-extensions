@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { fork } from "node:child_process";
+import { runtimeEnv } from "./runtime.mjs";
 import { mkdtemp, rm, readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { sharedUsageFetch, getUsageApiKey, writeJson, digest } from "../shared/account-coordination.mjs";
+import { sharedUsageFetch, getUsageApiKey, writeJson, digest, withFileLock, withAccountTransaction } from "../shared/account-coordination.mjs";
 
 async function environment(t) {
 	const dir = await mkdtemp(join(tmpdir(), "account-coordination-"));
@@ -19,7 +20,7 @@ async function environment(t) {
 }
 function worker(t, dir, mode, ...args) {
 	const child = fork(new URL("./fixtures/accounts-worker.mjs", import.meta.url), [mode, ...args], {
-		env: { ...process.env, PI_CODING_AGENT_DIR: dir }, stdio: ["ignore", "ignore", "pipe", "ipc"],
+		env: { ...process.env, ...runtimeEnv, PI_CODING_AGENT_DIR: dir }, stdio: ["ignore", "ignore", "pipe", "ipc"],
 	});
 	const messages = new Map();
 	const listeners = new Map();
@@ -38,9 +39,18 @@ function worker(t, dir, mode, ...args) {
 	t.after(async () => { if (child.exitCode === null) child.kill(); await exited; });
 	return {
 		send: message => child.send(message),
-		wait(event) {
+		wait(event, timeoutMs = 10_000) {
 			if (messages.has(event)) return Promise.resolve(messages.get(event));
-			return new Promise((resolve, reject) => listeners.set(event, { resolve, reject }));
+			return new Promise((resolve, reject) => {
+				const timer = setTimeout(() => {
+					listeners.delete(event);
+					reject(new Error(`Worker timed out waiting for ${event}`));
+				}, timeoutMs);
+				listeners.set(event, {
+					resolve: value => { clearTimeout(timer); resolve(value); },
+					reject: error => { clearTimeout(timer); reject(error); },
+				});
+			});
 		},
 	};
 }
@@ -57,6 +67,67 @@ const requests = async dir => {
 	try { return (await readFile(join(dir, "requests.log"), "utf8")).trim().split("\n"); }
 	catch (error) { if (error.code === "ENOENT") return []; throw error; }
 };
+
+for (const mode of ["sync-profile", "switch-profile", "delete-profile", "caretaker-profile"]) {
+	test(`${mode}: blocked identity service does not hold the native auth lock`, { timeout: 20_000 }, async t => {
+		const dir = await environment(t);
+		const a = account("A", Date.now() + 36_000_000), b = account("B", Date.now() + 36_000_000);
+		await seed(dir, [a, b], a);
+		await writeJson(join(dir, "auth.json"), { test: a.credential, anthropic: account("unknown").credential });
+		const syncing = worker(t, dir, mode, "B"), native = worker(t, dir, "native");
+		await Promise.all([syncing.wait("ready"), native.wait("ready")]);
+		const gate = join(dir, "usage-cache", `${digest("https://api.anthropic.com")}.gate.json`);
+		await withFileLock(gate, async () => {
+			syncing.send("go");
+			await syncing.wait("profile-gate");
+			// Keep the service gate held until native auth has COMPLETED, not just started.
+			native.send("go");
+			await native.wait("locked", 3_000);
+			native.send("finish");
+			await native.wait("done", 3_000);
+			assert.equal((await json(join(dir, "auth.json"))).test.refresh, "refresh-A-native");
+		});
+		const result = await syncing.wait("done");
+		if (mode === "switch-profile") assert.equal(result.ok, true);
+		if (mode === "delete-profile") assert.equal(result, true);
+		const store = await json(join(dir, "oauth-accounts.json"));
+		assert.ok(Object.values(store.accounts).some(a => a.stableKey === "anthropic:uuid:profile-A"));
+	});
+}
+
+test("late identity results cannot overwrite a native account switch", { timeout: 20_000 }, async t => {
+	const dir = await environment(t);
+	const a = { ...account("A"), provider: "anthropic", email: "a@example.com", stableKey: "anthropic:uuid:A" };
+	const b = { ...account("B"), provider: "anthropic", email: "b@example.com", stableKey: "anthropic:uuid:B" };
+	await writeJson(join(dir, "oauth-accounts.json"), { version: 1, activeAccounts: { anthropic: "A" }, accounts: { A: a, B: b } });
+	await writeJson(join(dir, "auth.json"), { anthropic: { ...a.credential, access: "rotated-A", refresh: "rotated-refresh-A" } });
+	const syncing = worker(t, dir, "sync-profile-held");
+	const native = worker(t, dir, "native-replace", "anthropic", JSON.stringify(b.credential));
+	await Promise.all([syncing.wait("ready"), native.wait("ready")]);
+	syncing.send("go");
+	await syncing.wait("profile-started");
+	native.send("go");
+	await native.wait("locked", 3_000);
+	native.send("finish");
+	await native.wait("done");
+	syncing.send("profile-finish");
+	await syncing.wait("done");
+	const store = await json(join(dir, "oauth-accounts.json"));
+	assert.equal(store.activeAccounts.anthropic, "B");
+	assert.deepEqual(store.accounts.A, a, "the stale A identity must not update the old account");
+	assert.equal(Object.keys(store.accounts).length, 2);
+	assert.deepEqual((await json(join(dir, "auth.json"))).anthropic, b.credential);
+});
+
+test("identity and quota transport refuses to run inside an account transaction", async t => {
+	await environment(t);
+	let requests = 0;
+	await assert.rejects(withAccountTransaction(() => sharedUsageFetch("https://quota.example/usage", {}, async () => {
+		requests++;
+		return Response.json({});
+	})), /outside an account transaction/);
+	assert.equal(requests, 0);
+});
 
 test("three real processes switching to the same expired account rotate only once", { timeout: 20_000 }, async t => {
 	const dir = await environment(t);

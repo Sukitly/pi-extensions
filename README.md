@@ -135,16 +135,22 @@ Behavior:
 - Background Caretaker: a cross-process lease allows at most one pass per hour; automatic passes skip active accounts (Pi owns their refresh). Explicit checks have a shared one-minute cooldown.
 - Safe switch: performs pre-flight refresh and waits for the local session to become idle before swapping globally shared credentials
 - Store changes and token refreshes use cross-process transactions, including Pi’s native `auth.json.lock`; fresh credentials are re-read under the lock and rotations are persisted before unlocking
+- Profile/identity lookups and service-gate waits run outside account transactions. Before committing, synchronization revalidates the credential/store snapshot and explicit-login generation; changed snapshots retry without overwriting newer credentials.
 - Refresh failures use a persistent per-account exponential cooldown; quota/identity requests share a cross-process cache and service-level rate limiter with the usage widget
 - Account lists load quota sequentially and stop scheduling when dismissed
 - Protects active credentials from overwrite when an account's token has expired or been revoked
 
-Tests use fake HTTP and temporary credentials, including real subprocess races against Pi 1.4.0’s native auth storage. Run them with:
+Tests use fake HTTP and temporary credentials, including real subprocess races against native auth storage (validated with Pi 1.4.0). The shared test loader resolves a project-local `@earendil-works/pi-coding-agent` installation, or uses `PI_TEST_RUNTIME_DIR` when set. This variable must point to the **package directory**, not the surrounding `node_modules`; child processes use the same installation. Missing dependencies fail explicitly rather than skipping tests.
+
+For an existing Pi installation:
 
 ```bash
 npm ci --prefix shared --ignore-scripts
-node --test tests/oauth-accounts.test.mjs tests/usage-widget.test.mjs tests/account-coordination.test.mjs
+export PI_TEST_RUNTIME_DIR="$HOME/.pi/agent/install/releases/1.4.0/node_modules/@earendil-works/pi-coding-agent"
+node --test tests/runtime.test.mjs tests/oauth-accounts.test.mjs tests/usage-widget.test.mjs tests/account-coordination.test.mjs
 ```
+
+With Pi and its dependencies installed locally in the project, omit `PI_TEST_RUNTIME_DIR`. The tests do not depend on a particular username or home directory.
 
 ### `branch-pr-widget.ts`
 
@@ -454,7 +460,8 @@ Behavior:
 - Shares a three-minute credential-scoped disk cache with `/accounts` across processes; startup does not bypass the cache
 - Serializes requests per service with a one-second minimum gap, exponential failure backoff, and shared 429 `Retry-After` cooldown
 - Never refreshes OAuth tokens for quota queries; expired credentials wait for Pi’s next real model request
-- Invalidates local quota/error state when credentials change, so switching accounts cannot reuse another account’s quota
+- Hides the displayed quota immediately when changed credentials are detected, before waiting for the new account’s request; a pending old-account request does not block that detection
+- Validates the request generation and re-reads credentials before committing either usage data or errors, so late results cannot overwrite another account’s quota or impose its retry cooldown
 - Refreshes on:
   - `session_start`
   - `model_select`

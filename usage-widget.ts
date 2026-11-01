@@ -515,9 +515,10 @@ const OPENAI_SUBSCRIPTION_USAGE_NOTICE =
 
 export default function (pi: ExtensionAPI) {
 	const usageCache = new Map<string, { data: UsageResponse; refreshedAt: number }>();
-	const usageRefreshes = new Map<string, Promise<void>>();
+	const usageRefreshes = new Map<string, Promise<UsageResponse | null>>();
 	const usageErrors = new Map<string, string>();
 	const credentialKeys = new Map<string, string>();
+	const credentialVersions = new Map<string, number>();
 	const retryAfter = new Map<string, number>();
 	const failures = new Map<string, number>();
 	let activeProvider: string | null = null;
@@ -584,50 +585,95 @@ export default function (pi: ExtensionAPI) {
 		});
 	}
 
+	function adoptCredential(ctx: ExtensionContext, provider: string, apiKey: string | undefined) {
+		if (credentialKeys.get(provider) === apiKey) return;
+		if (apiKey) credentialKeys.set(provider, apiKey);
+		else credentialKeys.delete(provider);
+		credentialVersions.set(provider, (credentialVersions.get(provider) ?? 0) + 1);
+		usageCache.delete(provider);
+		usageErrors.delete(provider);
+		retryAfter.delete(provider);
+		failures.delete(provider);
+		// Clearing the cache is not enough: remove the already rendered quota NOW,
+		// before waiting for the new account's request (or another service gate).
+		hideWidget(ctx);
+	}
+
+	function recordFailure(provider: string, error: unknown, apiKey?: string) {
+		usageErrors.set(provider, formatUsageError(error, apiKey));
+		const count = (failures.get(provider) ?? 0) + 1;
+		failures.set(provider, count);
+		retryAfter.set(provider, Date.now() + Math.min(60_000 * 2 ** Math.min(count - 1, 4), 900_000));
+	}
+
 	async function refreshUsage(ctx: ExtensionContext, provider: string | null, token: number) {
 		if (!provider || !supportsUsageWidget(provider)) return;
-		// Capture before awaiting; a session reload invalidates ctx.
 		const modelRegistry = ctx.modelRegistry;
-		while (usageRefreshes.has(provider)) await usageRefreshes.get(provider);
+		let apiKey: string | undefined;
+		try {
+			// Identify the account BEFORE joining an in-flight request. A slow A
+			// request must never prevent detecting B and clearing A's display.
+			apiKey = await getUsageApiKey(modelRegistry, provider);
+			if (!apiKey) throw new Error("No API credentials available; please log in");
+		} catch (error) {
+			if (!isCurrent(token, provider)) return;
+			adoptCredential(ctx, provider, undefined);
+			recordFailure(provider, error);
+			return;
+		}
 		if (!isCurrent(token, provider)) return;
-		const refresh = (async () => {
-			let apiKey: string | undefined;
-			try {
-				apiKey = await getUsageApiKey(modelRegistry, provider);
-				if (!isCurrent(token, provider)) return;
-				if (!apiKey) throw new Error("No API credentials available; please log in");
-				if (credentialKeys.get(provider) !== apiKey) {
-					credentialKeys.set(provider, apiKey);
-					usageCache.delete(provider);
-					usageErrors.delete(provider);
-					retryAfter.delete(provider);
-					failures.delete(provider);
-				}
-				const cached = usageCache.get(provider);
-				if (Date.now() < (retryAfter.get(provider) ?? 0)) return;
-				if (cached && !usageErrors.has(provider) && Date.now() - cached.refreshedAt < MIN_REFRESH_GAP_MS) return;
-				const data = await fetchUsage(provider, apiKey);
-				if (data) {
-					usageCache.set(provider, { data, refreshedAt: Date.now() });
-					usageErrors.delete(provider);
-					retryAfter.delete(provider);
-					failures.delete(provider);
-				}
-			} catch (error) {
-				if (!apiKey) {
-					// The account may have changed or logged out; its identity is unknown.
-					usageCache.delete(provider);
-					credentialKeys.delete(provider);
-				}
-				usageErrors.set(provider, formatUsageError(error, apiKey));
-				const count = (failures.get(provider) ?? 0) + 1;
-				failures.set(provider, count);
-				retryAfter.set(provider, Date.now() + Math.min(60_000 * 2 ** Math.min(count - 1, 4), 900_000));
-			}
-		})();
-		usageRefreshes.set(provider, refresh);
-		try { await refresh; }
-		finally { if (usageRefreshes.get(provider) === refresh) usageRefreshes.delete(provider); }
+		adoptCredential(ctx, provider, apiKey);
+		const version = credentialVersions.get(provider);
+		const ownsState = () => isCurrent(token, provider) &&
+			credentialKeys.get(provider) === apiKey && credentialVersions.get(provider) === version;
+		const cached = usageCache.get(provider);
+		if (Date.now() < (retryAfter.get(provider) ?? 0)) return;
+		if (cached && !usageErrors.has(provider) && Date.now() - cached.refreshedAt < MIN_REFRESH_GAP_MS) return;
+
+		// Only share transport work. Each caller independently validates its
+		// lifecycle and current credentials before committing any result.
+		const requestKey = JSON.stringify([provider, apiKey, version]);
+		let request = usageRefreshes.get(requestKey);
+		if (!request) {
+			request = fetchUsage(provider, apiKey);
+			usageRefreshes.set(requestKey, request);
+		}
+		let data: UsageResponse | null = null;
+		let failure: unknown;
+		let failed = false;
+		try { data = await request; }
+		catch (error) { failure = error; failed = true; }
+		finally {
+			if (usageRefreshes.get(requestKey) === request) usageRefreshes.delete(requestKey);
+		}
+		if (!ownsState()) return;
+
+		// Another process can switch auth.json without emitting a local event.
+		// Re-read via the non-refreshing quota credential path for BOTH success
+		// and failure; an old failure must not impose backoff on the new account.
+		let latestKey: string | undefined;
+		try {
+			latestKey = await getUsageApiKey(modelRegistry, provider);
+			if (!latestKey) throw new Error("No API credentials available; please log in");
+		} catch (error) {
+			if (!ownsState()) return;
+			adoptCredential(ctx, provider, undefined);
+			recordFailure(provider, error, apiKey);
+			return;
+		}
+		if (!ownsState()) return;
+		if (latestKey !== apiKey) {
+			adoptCredential(ctx, provider, latestKey);
+			return;
+		}
+		if (failed) {
+			recordFailure(provider, failure, apiKey);
+		} else if (data) {
+			usageCache.set(provider, { data, refreshedAt: Date.now() });
+			usageErrors.delete(provider);
+			retryAfter.delete(provider);
+			failures.delete(provider);
+		}
 	}
 
 	function refreshInBackground(

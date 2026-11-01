@@ -6,7 +6,8 @@ import { constants as fsConstants } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
-import { withAccountTransaction, assertAccountTransaction, withCaretakerLease, sharedUsageFetch } from "./shared/account-coordination.mjs";
+import { isDeepStrictEqual } from "node:util";
+import { withAccountTransaction, assertAccountTransaction, assertOutsideAccountTransaction, withCaretakerLease, sharedUsageFetch } from "./shared/account-coordination.mjs";
 
 function getAgentDir(): string {
 	return process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
@@ -94,9 +95,11 @@ let caretakerTimer: NodeJS.Timeout | null = null;
 let caretakerController: AbortController | null = null;
 let isCaretakerRunning = false;
 let pendingLoginProvider: string | null = null;
+let pendingLoginVersion = 0;
 
 export function setPendingLoginProvider(provider: string | null): void {
 	pendingLoginProvider = provider;
+	pendingLoginVersion++;
 }
 
 // ============================================================================
@@ -237,6 +240,7 @@ function extractIdentityFromToken(token: string): { email?: string; accountId?: 
 const profileCache = new Map<string, { email?: string; displayName?: string; uuid?: string }>();
 
 async function fetchAnthropicProfile(token: string): Promise<{ email?: string; displayName?: string; uuid?: string } | null> {
+	assertOutsideAccountTransaction();
 	if (!token) return null;
 	const cached = profileCache.get(token);
 	if (cached) return cached;
@@ -639,116 +643,167 @@ function matchAccountForCredential(
  * corresponding active account in oauth-accounts.json, or auto-adopts newly
  * logged-in accounts seamlessly.
  */
+type LiveIdentity = Awaited<ReturnType<typeof resolveLiveIdentity>>;
+
+/**
+ * Prepare identity outside ALL account locks, then validate the snapshot under
+ * both locks before syncing or executing a credential mutation. Callbacks must
+ * not call this wrapper again: rotation and persistence stay in the locked phase.
+ */
+async function withSyncedAccounts<T>(fn: (store: AccountsStore) => Promise<T>): Promise<T> {
+	assertOutsideAccountTransaction();
+	for (let attempt = 0; attempt < 5; attempt++) {
+		const snapshot = await storeLock.run(async () => ({
+			auth: await readCurrentAuth(),
+			store: await loadAccountsStore(),
+			loginProvider: pendingLoginProvider,
+			loginVersion: pendingLoginVersion,
+		}));
+		const identities = new Map<string, LiveIdentity>();
+		for (const [provider, credential] of Object.entries(snapshot.auth)) {
+			if (!isOAuthCredential(credential)) continue;
+			const known = Object.values(snapshot.store.accounts).some(
+				account => account.provider === provider && account.credential.refresh === credential.refresh,
+			);
+			if (!known) identities.set(provider, await resolveLiveIdentity(provider, credential));
+		}
+		const result = await storeLock.run(async () => {
+			const auth = await readCurrentAuth();
+			const store = await loadAccountsStore();
+			// Includes store state and login generation: never use an identity
+			// lookup against a changed account mapping or a later explicit login.
+			if (!isDeepStrictEqual(auth, snapshot.auth) || !isDeepStrictEqual(store, snapshot.store) ||
+				pendingLoginVersion !== snapshot.loginVersion) return { retry: true } as const;
+			await syncLiveToStoreLocked(auth, store, identities, snapshot.loginProvider, snapshot.loginVersion);
+			return { retry: false, value: await fn(store) } as const;
+		});
+		if (!result.retry) return result.value;
+	}
+	throw new Error("Credentials changed repeatedly during account synchronization; retry the operation");
+}
+
 export async function syncLiveToStore(): Promise<AccountsStore> {
-	return storeLock.run(async () => {
-		const [auth, store] = await Promise.all([readCurrentAuth(), loadAccountsStore()]);
-		let modified = false;
+	return withSyncedAccounts(async store => store);
+}
 
-		for (const [providerId, rawCred] of Object.entries(auth)) {
-			if (!isOAuthCredential(rawCred)) continue;
+// No identity/profile/quota network work is permitted in this phase.
+async function syncLiveToStoreLocked(
+	auth: AuthFile,
+	store: AccountsStore,
+	identities: Map<string, LiveIdentity>,
+	loginProvider: string | null,
+	loginVersion: number,
+): Promise<AccountsStore> {
+	assertAccountTransaction();
+	let modified = false;
 
-			// FAST-PATH: If this exact refresh token already exists in store, match immediately with zero network requests!
-			const providerAccounts = Object.values(store.accounts).filter((a) => a.provider === providerId);
-			const byRefresh = providerAccounts.find((a) => a.credential.refresh === rawCred.refresh);
+	for (const [providerId, rawCred] of Object.entries(auth)) {
+		if (!isOAuthCredential(rawCred)) continue;
 
-			if (byRefresh) {
-				if (store.activeAccounts[providerId] !== byRefresh.id) {
-					store.activeAccounts[providerId] = byRefresh.id;
-					modified = true;
-				}
-				if (
-					byRefresh.credential.access !== rawCred.access ||
-					byRefresh.credential.expires !== rawCred.expires
-				) {
-					byRefresh.credential = { ...byRefresh.credential, ...rawCred };
-					byRefresh.status = "valid";
-					byRefresh.statusError = undefined;
-					byRefresh.lastRefreshError = undefined;
-					byRefresh.nextRefreshAttemptAt = 0;
-					byRefresh.refreshFailures = 0;
-					byRefresh.lastUsedAt = Date.now();
-					modified = true;
-				}
-				continue;
-			}
+		// FAST-PATH: If this exact refresh token already exists in store, match immediately with zero network requests!
+		const providerAccounts = Object.values(store.accounts).filter((a) => a.provider === providerId);
+		const byRefresh = providerAccounts.find((a) => a.credential.refresh === rawCred.refresh);
 
-			// SLOW-PATH: Refresh token is new or changed. Resolve identity to distinguish new account vs rotation.
-			const isExplicitLogin = pendingLoginProvider === providerId || pendingLoginProvider === "__any__";
-			const liveIdentity = await resolveLiveIdentity(providerId, rawCred);
-			const liveStableKey = computeStableKey(providerId, liveIdentity);
-			const matched = matchAccountForCredential(store, providerId, rawCred, liveIdentity, isExplicitLogin);
-
-			if (matched) {
-				// Matched existing account: update tokens
-				if (store.activeAccounts[providerId] !== matched.id) {
-					store.activeAccounts[providerId] = matched.id;
-					modified = true;
-				}
-				if (
-					matched.credential.refresh !== rawCred.refresh ||
-					matched.credential.access !== rawCred.access ||
-					matched.credential.expires !== rawCred.expires
-				) {
-					matched.credential = { ...matched.credential, ...rawCred };
-					matched.status = "valid";
-					matched.statusError = undefined;
-					matched.lastRefreshError = undefined;
-					matched.nextRefreshAttemptAt = 0;
-					matched.refreshFailures = 0;
-					matched.lastUsedAt = Date.now();
-					modified = true;
-				}
-				if (!matched.email && liveIdentity.email) {
-					matched.email = liveIdentity.email;
-					modified = true;
-				}
-				if (!matched.stableKey && liveStableKey) {
-					matched.stableKey = liveStableKey;
-					modified = true;
-				}
-				if (matched.alias.endsWith("-default") && liveIdentity.email) {
-					matched.alias = liveIdentity.email;
-					modified = true;
-				}
-				if (isExplicitLogin) {
-					pendingLoginProvider = null;
-				}
-			} else {
-				// Brand new account from /login or fresh external setup!
-				const id = `${providerId}-${fingerprintToken(rawCred.refresh)}`;
-				const preferredAlias = liveIdentity.email || `${providerId}-default`;
-				const alias = generateUniqueAlias(store, providerId, preferredAlias);
-				const stableKey = computeStableKey(providerId, liveIdentity);
-
-				const newAcc: StoredAccount = {
-					id,
-					alias,
-					provider: providerId,
-					credential: rawCred,
-					stableKey,
-					email: liveIdentity.email,
-					accountId: liveIdentity.accountId,
-					addedAt: Date.now(),
-					lastUsedAt: Date.now(),
-					status: "valid",
-				};
-
-				await ensureAccountIdentity(newAcc);
-				store.accounts[id] = newAcc;
-				store.activeAccounts[providerId] = id;
+		if (byRefresh) {
+			if (store.activeAccounts[providerId] !== byRefresh.id) {
+				store.activeAccounts[providerId] = byRefresh.id;
 				modified = true;
+			}
+			if (
+				byRefresh.credential.access !== rawCred.access ||
+				byRefresh.credential.expires !== rawCred.expires
+			) {
+				byRefresh.credential = { ...byRefresh.credential, ...rawCred };
+				byRefresh.status = "valid";
+				byRefresh.statusError = undefined;
+				byRefresh.lastRefreshError = undefined;
+				byRefresh.nextRefreshAttemptAt = 0;
+				byRefresh.refreshFailures = 0;
+				byRefresh.lastUsedAt = Date.now();
+				modified = true;
+			}
+			continue;
+		}
 
-				if (isExplicitLogin) {
-					pendingLoginProvider = null;
-				}
+		// Identity was prepared outside the transaction for this exact snapshot.
+		const isExplicitLogin = loginProvider === providerId || loginProvider === "__any__";
+		const liveIdentity = identities.get(providerId);
+		if (!liveIdentity) throw new Error("Missing prepared account identity");
+		const liveStableKey = computeStableKey(providerId, liveIdentity);
+		const matched = matchAccountForCredential(store, providerId, rawCred, liveIdentity, isExplicitLogin);
+
+		if (matched) {
+			// Matched existing account: update tokens
+			if (store.activeAccounts[providerId] !== matched.id) {
+				store.activeAccounts[providerId] = matched.id;
+				modified = true;
+			}
+			if (
+				matched.credential.refresh !== rawCred.refresh ||
+				matched.credential.access !== rawCred.access ||
+				matched.credential.expires !== rawCred.expires
+			) {
+				matched.credential = { ...matched.credential, ...rawCred };
+				matched.status = "valid";
+				matched.statusError = undefined;
+				matched.lastRefreshError = undefined;
+				matched.nextRefreshAttemptAt = 0;
+				matched.refreshFailures = 0;
+				matched.lastUsedAt = Date.now();
+				modified = true;
+			}
+			if (!matched.email && liveIdentity.email) {
+				matched.email = liveIdentity.email;
+				modified = true;
+			}
+			if (!matched.stableKey && liveStableKey) {
+				matched.stableKey = liveStableKey;
+				modified = true;
+			}
+			if (matched.alias.endsWith("-default") && liveIdentity.email) {
+				matched.alias = liveIdentity.email;
+				modified = true;
+			}
+			if (isExplicitLogin) {
+				loginProvider = null;
+			}
+		} else {
+			// Brand new account from /login or fresh external setup!
+			const id = `${providerId}-${fingerprintToken(rawCred.refresh)}`;
+			const preferredAlias = liveIdentity.email || `${providerId}-default`;
+			const alias = generateUniqueAlias(store, providerId, preferredAlias);
+			const stableKey = computeStableKey(providerId, liveIdentity);
+
+			const newAcc: StoredAccount = {
+				id,
+				alias,
+				provider: providerId,
+				credential: rawCred,
+				stableKey,
+				email: liveIdentity.email,
+				accountId: liveIdentity.accountId,
+				addedAt: Date.now(),
+				lastUsedAt: Date.now(),
+				status: "valid",
+			};
+
+			store.accounts[id] = newAcc;
+			store.activeAccounts[providerId] = id;
+			modified = true;
+
+			if (isExplicitLogin) {
+				loginProvider = null;
 			}
 		}
+	}
 
-		if (modified) {
-			await saveAccountsStore(store);
-		}
-		return store;
-	});
+	if (modified) {
+		await saveAccountsStore(store);
+	}
+	if (pendingLoginVersion === loginVersion && pendingLoginProvider !== loginProvider) {
+		setPendingLoginProvider(loginProvider);
+	}
+	return store;
 }
 
 /**
@@ -758,72 +813,75 @@ type RefreshResult = { success: boolean; credential?: OAuthCredentialPayload; er
 
 // All refresh entry points share the same transaction as Pi's native auth store.
 // Re-read after locking, and persist rotated credentials before releasing the lock.
-async function refreshSingleAccount(
+async function refreshSingleAccount(account: StoredAccount, modelRegistry: any): Promise<RefreshResult> {
+	return withSyncedAccounts(store => refreshAccountLocked(account, modelRegistry, store));
+}
+
+async function refreshAccountLocked(
 	account: StoredAccount,
 	modelRegistry: any,
+	store: AccountsStore,
 ): Promise<RefreshResult> {
-	return storeLock.run(async () => {
-		const store = await syncLiveToStore();
-		const target = store.accounts[account.id];
-		if (!target) return { success: false, error: "Account was deleted" };
-		if ((target.credential.refresh !== account.credential.refresh || target.credential.access !== account.credential.access) &&
-			target.credential.expires > Date.now() + SWITCH_REFRESH_THRESHOLD_MS) {
-			return { success: true, credential: target.credential };
+	assertAccountTransaction();
+	const target = store.accounts[account.id];
+	if (!target) return { success: false, error: "Account was deleted" };
+	if ((target.credential.refresh !== account.credential.refresh || target.credential.access !== account.credential.access) &&
+		target.credential.expires > Date.now() + SWITCH_REFRESH_THRESHOLD_MS) {
+		return { success: true, credential: target.credential };
+	}
+	if (Date.now() < (target.nextRefreshAttemptAt ?? 0)) {
+		return { success: false, fatal: isFatalOAuthError(target.statusError || ""), error: target.lastRefreshError || target.statusError || "Refresh cooldown active" };
+	}
+	if ((target.lastRefreshedAt ?? 0) > Date.now() - 60_000 && target.credential.expires > Date.now() + SWITCH_REFRESH_THRESHOLD_MS) {
+		return { success: true, credential: target.credential };
+	}
+	const provider = modelRegistry?.getProvider?.(target.provider);
+	const refreshFn = provider?.auth?.oauth?.refresh;
+	if (typeof refreshFn !== "function") {
+		const error = `Provider "${target.provider}" does not expose OAuth refresh`;
+		if (Date.now() >= target.credential.expires) {
+			target.status = "expired";
+			target.statusError = error;
+			await saveAccountsStore(store);
 		}
-		if (Date.now() < (target.nextRefreshAttemptAt ?? 0)) {
-			return { success: false, fatal: isFatalOAuthError(target.statusError || ""), error: target.lastRefreshError || target.statusError || "Refresh cooldown active" };
-		}
-		if ((target.lastRefreshedAt ?? 0) > Date.now() - 60_000 && target.credential.expires > Date.now() + SWITCH_REFRESH_THRESHOLD_MS) {
-			return { success: true, credential: target.credential };
-		}
-		const provider = modelRegistry?.getProvider?.(target.provider);
-		const refreshFn = provider?.auth?.oauth?.refresh;
-		if (typeof refreshFn !== "function") {
-			const error = `Provider "${target.provider}" does not expose OAuth refresh`;
-			if (Date.now() >= target.credential.expires) {
-				target.status = "expired";
-				target.statusError = error;
-				await saveAccountsStore(store);
-			}
-			return { success: false, unsupported: true, error };
-		}
+		return { success: false, unsupported: true, error };
+	}
 
-		let result: RefreshResult;
-		try {
-			// Start the timeout after acquiring the lock, not while waiting for another process.
-			const refreshed = (await refreshFn(target.credential, AbortSignal.timeout(15_000))) as OAuthCredentialPayload;
-			if (!refreshed?.access || !refreshed?.refresh || !Number.isFinite(refreshed.expires)) {
-				throw new Error("Invalid credential returned from provider refresh");
-			}
-			result = { success: true, credential: { ...target.credential, ...refreshed, type: "oauth" } };
-		} catch (error) {
-			result = { success: false, error: error instanceof Error ? error.message : String(error), fatal: isFatalOAuthError(error) };
+	let result: RefreshResult;
+	try {
+		// Start the timeout after acquiring the lock, not while waiting for another process.
+		const refreshed = (await refreshFn(target.credential, AbortSignal.timeout(15_000))) as OAuthCredentialPayload;
+		if (!refreshed?.access || !refreshed?.refresh || !Number.isFinite(refreshed.expires)) {
+			throw new Error("Invalid credential returned from provider refresh");
 		}
-		if (result.success && result.credential) {
-			target.credential = result.credential;
-			target.status = "valid";
-			target.statusError = undefined;
-			target.lastRefreshError = undefined;
-			target.refreshFailures = 0;
-			target.nextRefreshAttemptAt = 0;
-			target.lastRefreshedAt = Date.now();
-			if (store.activeAccounts[target.provider] === target.id) {
-				const auth = await readCurrentAuth();
-				auth[target.provider] = result.credential;
-				await writeCurrentAuth(auth);
-			}
-		} else {
-			target.refreshFailures = (target.refreshFailures ?? 0) + 1;
-			target.nextRefreshAttemptAt = Date.now() + Math.min(60_000 * 2 ** Math.min(target.refreshFailures - 1, 6), 3_600_000);
-			target.lastRefreshError = result.error;
-			if (result.fatal || Date.now() >= target.credential.expires) {
-				target.status = "expired";
-				target.statusError = result.error;
-			}
+		result = { success: true, credential: { ...target.credential, ...refreshed, type: "oauth" } };
+	} catch (error) {
+		result = { success: false, error: error instanceof Error ? error.message : String(error), fatal: isFatalOAuthError(error) };
+	}
+	if (result.success && result.credential) {
+		target.credential = result.credential;
+		target.status = "valid";
+		target.statusError = undefined;
+		target.lastRefreshError = undefined;
+		target.refreshFailures = 0;
+		target.nextRefreshAttemptAt = 0;
+		target.lastRefreshedAt = Date.now();
+		if (store.activeAccounts[target.provider] === target.id) {
+			const auth = await readCurrentAuth();
+			auth[target.provider] = result.credential;
+			await writeCurrentAuth(auth);
 		}
-		await saveAccountsStore(store);
-		return result;
-	});
+	} else {
+		target.refreshFailures = (target.refreshFailures ?? 0) + 1;
+		target.nextRefreshAttemptAt = Date.now() + Math.min(60_000 * 2 ** Math.min(target.refreshFailures - 1, 6), 3_600_000);
+		target.lastRefreshError = result.error;
+		if (result.fatal || Date.now() >= target.credential.expires) {
+			target.status = "expired";
+			target.statusError = result.error;
+		}
+	}
+	await saveAccountsStore(store);
+	return result;
 }
 
 /** One pass per hour across all processes; normal passes only refresh dormant accounts. */
@@ -850,9 +908,8 @@ export async function runGlobalCaretaker(
 					await sleep(randomJitterMs(6, 15), options.signal);
 				}
 				if (options.signal?.aborted) break;
-				await storeLock.run(async () => {
+				await withSyncedAccounts(async latest => {
 					if (options.signal?.aborted) return;
-					const latest = await syncLiveToStore();
 					const account = latest.accounts[snapshot.id];
 					if (!account) return;
 					if ((!options.force && latest.activeAccounts[account.provider] === account.id) ||
@@ -864,7 +921,7 @@ export async function runGlobalCaretaker(
 					}
 					attemptedProviders.add(account.provider);
 					// Once rotation starts, finish persistence even if the session closes.
-					const result = await refreshSingleAccount(account, modelRegistry);
+					const result = await refreshAccountLocked(account, modelRegistry, latest);
 					if (result.success) report.refreshed.push(`${account.provider}/${account.alias}`);
 					else if (result.unsupported) report.skipped.push(account.alias);
 					else {
@@ -899,13 +956,12 @@ export async function switchAccount(
 	targetAccountId: string,
 ): Promise<{ ok: boolean; message: string }> {
 	if (typeof (ctx as any)?.waitForIdle === "function") await (ctx as any).waitForIdle();
-	const result = await storeLock.run(async () => {
-		const store = await syncLiveToStore();
+	const result = await withSyncedAccounts(async store => {
 		const target = store.accounts[targetAccountId];
 		if (!target) return { ok: false, message: `Account "${targetAccountId}" not found.` };
 		let warningNote = "";
 		if (Date.now() + SWITCH_REFRESH_THRESHOLD_MS >= target.credential.expires) {
-			const refreshed = await refreshSingleAccount(target, (ctx as any).modelRegistry);
+			const refreshed = await refreshAccountLocked(target, (ctx as any).modelRegistry, store);
 			if (refreshed.success && refreshed.credential) {
 				target.credential = refreshed.credential;
 			} else if (refreshed.fatal || Date.now() >= target.credential.expires) {
@@ -914,7 +970,7 @@ export async function switchAccount(
 				warningNote = " (Refresh unavailable; using valid access token)";
 			}
 		}
-		// refreshSingleAccount persisted status/backoff; do not overwrite it with the old snapshot.
+		// The locked refresh persisted status/backoff; re-read before selecting the account.
 		const latest = await loadAccountsStore();
 		const selected = latest.accounts[target.id];
 		selected.lastUsedAt = Date.now();
@@ -939,8 +995,7 @@ export async function switchAccount(
  * - Triggers modelRegistry.refresh() to reflect logout.
  */
 export async function deleteAccount(accountId: string, modelRegistry?: any): Promise<boolean> {
-	const removed = await storeLock.run(async () => {
-		const store = await syncLiveToStore();
+	const removed = await withSyncedAccounts(async store => {
 		const acc = store.accounts[accountId];
 		if (!acc) return false;
 
@@ -1351,7 +1406,7 @@ export default function (pi: ExtensionAPI) {
 		if (text.startsWith("/login")) {
 			await syncLiveToStore().catch(() => {});
 			const parts = text.split(/\s+/);
-			pendingLoginProvider = parts[1]?.toLowerCase() || "__any__";
+			setPendingLoginProvider(parts[1]?.toLowerCase() || "__any__");
 		}
 	});
 

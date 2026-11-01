@@ -50,6 +50,9 @@ export async function withFileLock(path, fn, { tryOnly = false, signal } = {}) {
 }
 
 const transaction = new AsyncLocalStorage();
+export function assertOutsideAccountTransaction() {
+	if (transaction.getStore()?.active) throw new Error("Identity/quota work must run outside an account transaction");
+}
 export function assertAccountTransaction() {
 	const tx = transaction.getStore();
 	if (!tx || tx.dir !== agentDir() || !tx.active) throw new Error("Account write outside transaction");
@@ -97,6 +100,7 @@ function replay(entry) {
 // Shared by the account menu AND widget. No credentials in filenames or cache
 // contents. Serialize per service as well as deduplicating identical requests.
 export async function sharedUsageFetch(url, init = {}, fetchImpl = globalThis.fetch) {
+	assertOutsideAccountTransaction();
 	const headers = new Headers(init.headers);
 	const scope = new URL(url).origin;
 	const key = digest(JSON.stringify([url, init.method || "GET", init.body || "", headers.get("authorization"), headers.get("chatgpt-account-id")]));

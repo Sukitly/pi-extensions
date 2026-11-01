@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdtemp, rm, readFile, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createJiti } from "/Users/sukit/.pi/agent/install/releases/1.4.0/node_modules/jiti/lib/jiti.mjs";
+import { createTestJiti } from "./runtime.mjs";
 
 async function createTestEnv() {
 	const tempDir = await mkdtemp(join(tmpdir(), "oauth-accounts-test-"));
@@ -14,12 +14,7 @@ async function createTestEnv() {
 	await mkdir(agentDir, { recursive: true });
 	process.env.PI_CODING_AGENT_DIR = agentDir;
 
-	const jiti = createJiti(import.meta.url, {
-		alias: {
-			"@earendil-works/pi-coding-agent": "/Users/sukit/.pi/agent/install/releases/1.4.0/node_modules/@earendil-works/pi-coding-agent",
-			"@earendil-works/pi-tui": "/Users/sukit/.pi/agent/install/releases/1.4.0/node_modules/@earendil-works/pi-tui",
-		},
-	});
+	const jiti = createTestJiti(import.meta.url);
 
 	const mod = await jiti.import("../oauth-accounts.ts");
 
@@ -174,6 +169,45 @@ test("syncLiveToStore with explicit /login detects and adds a new distinct accou
 		assert.notEqual(accountAId, accountBId);
 		assert.equal(store.accounts[accountBId].credential.refresh, "refresh-token-B");
 	} finally {
+		await env.cleanup();
+	}
+});
+
+test("an explicit login during identity lookup is revalidated instead of merging into the old active account", { timeout: 10_000 }, async () => {
+	const env = await createTestEnv();
+	let releaseProfile;
+	let profileStarted;
+	const started = new Promise(resolve => { profileStarted = resolve; });
+	try {
+		const original = { type: "oauth", access: "old-login-access", refresh: "old-login-refresh", expires: Date.now() + 3_600_000 };
+		await env.writeAuth({ anthropic: original });
+		await env.mod.syncLiveToStore();
+		const initial = await env.readStore();
+		const oldId = initial.activeAccounts.anthropic;
+		const incoming = { ...original, access: "new-login-access", refresh: "new-login-refresh" };
+		await env.writeAuth({ anthropic: incoming });
+		globalThis.fetch = async () => {
+			profileStarted();
+			return new Promise(resolve => { releaseProfile = () => resolve(new Response("profile unavailable", { status: 503 })); });
+		};
+		const syncing = env.mod.syncLiveToStore();
+		await started;
+		env.mod.setPendingLoginProvider("anthropic");
+		releaseProfile();
+		const store = await syncing;
+		assert.equal(Object.keys(store.accounts).length, 2);
+		assert.notEqual(store.activeAccounts.anthropic, oldId);
+		assert.deepEqual(store.accounts[oldId].credential, original);
+		// The validated login was consumed; a later opaque rotation must update
+		// the new active slot rather than creating a third account.
+		globalThis.fetch = async () => new Response("profile unavailable", { status: 503 });
+		await env.writeAuth({ anthropic: { ...incoming, access: "post-login-rotation", refresh: "post-login-refresh" } });
+		const rotated = await env.mod.syncLiveToStore();
+		assert.equal(Object.keys(rotated.accounts).length, 2);
+		assert.equal(rotated.activeAccounts.anthropic, store.activeAccounts.anthropic);
+		assert.equal(rotated.accounts[store.activeAccounts.anthropic].credential.refresh, "post-login-refresh");
+	} finally {
+		env.mod.setPendingLoginProvider(null);
 		await env.cleanup();
 	}
 });

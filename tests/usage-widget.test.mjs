@@ -3,7 +3,8 @@ import { readFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
 import test from "node:test";
 
-// Stub only the TUI component; exercise the real fetch, state and lifecycle code.
+// Exercise widget state, lifecycle and response normalization with controlled
+// credentials/transport. Real shared transport is covered in account-coordination.test.mjs.
 const source = stripTypeScriptTypes(readFileSync(new URL("../usage-widget.ts", import.meta.url), "utf8"))
 	.replace(/^import .*;$/gm, "")
 	.replace("export default function", "return function");
@@ -503,6 +504,102 @@ test("account change during an in-flight quota request does not leave the old ac
 	await h.emit("agent_end");
 	finish(success());
 	await new Promise(resolve => setImmediate(resolve));
+	assert.match(h.text, /80%/);
+	assert.doesNotMatch(h.text, /25%/);
+});
+
+test("switching credentials hides rendered quota while the new request is still pending", async () => {
+	let key = "account-a";
+	let finishB;
+	const h = harness({ credentials: async () => key, fetch: async () => key === "account-a" ? success() :
+		new Promise(resolve => { finishB = resolve; }) });
+	await h.emit();
+	assert.match(h.text, /25%/);
+	key = "account-b";
+	await h.emit("agent_end");
+	assert.equal(typeof finishB, "function", "B must be requested");
+	assert.equal(h.text, "", "A must disappear before B responds");
+	finishB(Response.json({ five_hour: { utilization: 80, resets_at: null } }));
+	await new Promise(resolve => setImmediate(resolve));
+	assert.match(h.text, /80%/);
+});
+
+for (const lateResult of ["success", "failure"]) {
+	test(`a pending A refresh does not block B or commit a late ${lateResult}`, async () => {
+		let key = "account-a";
+		let finishA, rejectA, finishB;
+		let requestsA = 0, requestsB = 0;
+		const h = harness({ credentials: async () => key, fetch: async () => {
+			if (key === "account-a") {
+				if (++requestsA === 1) return success();
+				return new Promise((resolve, reject) => { finishA = resolve; rejectA = reject; });
+			}
+			requestsB++;
+			return new Promise(resolve => { finishB = resolve; });
+		} });
+		await h.emit();
+		h.advance(180_001);
+		await h.emit("agent_end"); // A is refreshing, with its own stale quota still visible.
+		assert.match(h.text, /25%/);
+		key = "account-b";
+		await h.emit("agent_end");
+		assert.equal(h.text, "");
+		assert.equal(requestsB, 1, "B must not wait for A's request");
+		finishB(Response.json({ five_hour: { utilization: 80, resets_at: null } }));
+		await new Promise(resolve => setImmediate(resolve));
+		assert.match(h.text, /80%/);
+		if (lateResult === "success") finishA(success());
+		else rejectA(new Error("HTTP 429 from old account A"));
+		await new Promise(resolve => setImmediate(resolve));
+		assert.match(h.text, /80%/);
+		assert.doesNotMatch(h.text, /25%|429|failed/);
+		// Expose polluted cache/error/backoff that might not have redrawn yet.
+		await h.emit("agent_end");
+		assert.match(h.text, /80%/);
+		assert.doesNotMatch(h.text, /25%|429|failed/);
+		assert.equal(requestsB, 1);
+	});
+}
+
+for (const lateResult of ["success", "failure"]) {
+	test(`credential changes without a local event invalidate a late ${lateResult}`, async () => {
+		let key = "account-a";
+		let finish, reject;
+		let calls = 0;
+		const h = harness({ credentials: async () => key, fetch: async () => {
+			if (++calls === 1) return success();
+			return new Promise((resolve, fail) => { finish = resolve; reject = fail; });
+		} });
+		await h.emit();
+		h.advance(180_001);
+		await h.emit("agent_end");
+		key = "account-b"; // Simulate another process changing auth.json.
+		if (lateResult === "success") finish(success());
+		else reject(new Error("HTTP 429 from A"));
+		await new Promise(resolve => setImmediate(resolve));
+		assert.equal(h.text, "", "neither A's result nor its failure belongs to B");
+		await h.emit("agent_end");
+		assert.equal(calls, 3, "old failure must not install backoff for B");
+		finish(Response.json({ five_hour: { utilization: 80, resets_at: null } }));
+		await new Promise(resolve => setImmediate(resolve));
+		assert.match(h.text, /80%/);
+	});
+}
+
+test("shutdown prevents late quota results from entering the cache", async () => {
+	let finish;
+	let requests = 0;
+	const h = harness({ fetch: async () => {
+		if (++requests === 1) return new Promise(resolve => { finish = resolve; });
+		return Response.json({ five_hour: { utilization: 80, resets_at: null } });
+	} });
+	await h.emit();
+	await h.emit("session_shutdown");
+	finish(success());
+	await new Promise(resolve => setImmediate(resolve));
+	assert.equal(h.text, "");
+	await h.emit();
+	assert.equal(requests, 2);
 	assert.match(h.text, /80%/);
 	assert.doesNotMatch(h.text, /25%/);
 });
