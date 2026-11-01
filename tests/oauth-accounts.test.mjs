@@ -3,19 +3,21 @@ import test from "node:test";
 import { mkdtemp, rm, readFile, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createJiti } from "/Users/sukit/.pi/agent/install/releases/1.3.0/node_modules/jiti/lib/jiti.mjs";
+import { createJiti } from "/Users/sukit/.pi/agent/install/releases/1.4.0/node_modules/jiti/lib/jiti.mjs";
 
 async function createTestEnv() {
 	const tempDir = await mkdtemp(join(tmpdir(), "oauth-accounts-test-"));
 	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = async () => new Response("profile unavailable in test", { status: 503 });
 	const agentDir = join(tempDir, ".pi", "agent");
 	await mkdir(agentDir, { recursive: true });
 	process.env.PI_CODING_AGENT_DIR = agentDir;
 
 	const jiti = createJiti(import.meta.url, {
 		alias: {
-			"@earendil-works/pi-coding-agent": "/Users/sukit/.pi/agent/install/releases/1.3.0/node_modules/@earendil-works/pi-coding-agent",
-			"@earendil-works/pi-tui": "/Users/sukit/.pi/agent/install/releases/1.3.0/node_modules/@earendil-works/pi-tui",
+			"@earendil-works/pi-coding-agent": "/Users/sukit/.pi/agent/install/releases/1.4.0/node_modules/@earendil-works/pi-coding-agent",
+			"@earendil-works/pi-tui": "/Users/sukit/.pi/agent/install/releases/1.4.0/node_modules/@earendil-works/pi-tui",
 		},
 	});
 
@@ -25,6 +27,7 @@ async function createTestEnv() {
 	const accountsFile = join(agentDir, "oauth-accounts.json");
 
 	const cleanup = async () => {
+		globalThis.fetch = originalFetch;
 		if (originalAgentDir === undefined) {
 			delete process.env.PI_CODING_AGENT_DIR;
 		} else {
@@ -404,7 +407,7 @@ test("switchAccount pre-flight refresh: allows switch when refresh has transient
 		const res = await env.mod.switchAccount(mockCtx, "target-id");
 		// Must allow switch because token is still valid, but with warning note
 		assert.equal(res.ok, true);
-		assert.match(res.message, /timed out/);
+		assert.match(res.message, /Refresh unavailable/);
 
 		const auth = await env.readAuth();
 		assert.equal(auth.anthropic.access, "valid-acc");

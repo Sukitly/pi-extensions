@@ -11,7 +11,12 @@ const codexKey = `header.${btoa(JSON.stringify({ "https://api.openai.com/auth": 
 function harness({ provider = "anthropic", key = "sk-test-secret", fetch, credentials, oauth = false, hasUI = true } = {}) {
 	const handlers = new Map();
 	let widget = "";
-	const extension = new Function("Text", "fetch", source)(class { constructor(text) { this.text = text; } }, fetch);
+	let clock = Date.now();
+	class Clock extends Date { static now() { return clock; } }
+	const extension = new Function("Text", "sharedUsageFetch", "getUsageApiKey", "Date", source)(
+		class { constructor(text) { this.text = text; } }, fetch,
+		(registry, provider) => registry.getApiKeyForProvider(provider), Clock,
+	);
 	extension({ on: (event, handler) => handlers.set(event, handler) });
 	const ctx = {
 		hasUI, model: { provider },
@@ -23,6 +28,7 @@ function harness({ provider = "anthropic", key = "sk-test-secret", fetch, creden
 	};
 	return {
 		get text() { return widget; },
+		advance(ms) { clock += ms; },
 		setOAuth(value) { oauth = value; },
 		async emit(event = "session_start", data = {}) {
 			if (event === "model_select") ctx.model = data.model;
@@ -154,10 +160,14 @@ test("retains old data on failure and clears errors after recovery", async () =>
 	await h.emit();
 	assert.match(h.text, /25%/);
 	fail = true;
-	await h.emit(); // Session start forces a refresh, even with a recent cache.
+	h.advance(180_001);
+	await h.emit(); // Session start respects the same TTL as other events.
 	assert.match(h.text, /25%/);
 	assert.match(h.text, /refresh failed \(stale data\).*HTTP 429.*rate limited/);
 	fail = false;
+	await h.emit("agent_end");
+	assert.match(h.text, /429/, "failure remains during cooldown");
+	h.advance(60_001);
 	await h.emit("agent_end");
 	assert.match(h.text, /25%/);
 	assert.doesNotMatch(h.text, /refresh failed|429/);
@@ -421,4 +431,103 @@ test("opencode-go redacts oc_sk_ tokens echoed by a failing console response", a
 	await h.emit("session_start", { model: { id: "claude-haiku-5-5", provider: "opencode-go" } });
 	assert.match(h.text, /\[redacted\]/);
 	assert.doesNotMatch(h.text, new RegExp(token));
+});
+
+test("startup, model events and completed runs cannot bypass the usage TTL", async () => {
+	let requests = 0;
+	const h = harness({ fetch: async () => { requests++; return success(); } });
+	for (let i = 0; i < 4; i++) {
+		await h.emit();
+		await h.emit("agent_end");
+		await h.emit("model_select", { model: { provider: "anthropic" } });
+	}
+	assert.equal(requests, 1);
+	h.advance(180_001);
+	await h.emit("agent_end");
+	assert.equal(requests, 2);
+});
+
+test("429 failures back off across lifecycle events and retry exponentially", async () => {
+	let requests = 0;
+	const h = harness({ fetch: async () => { requests++; return new Response("rate limited", { status: 429 }); } });
+	await h.emit();
+	for (let i = 0; i < 5; i++) {
+		await h.emit();
+		await h.emit("agent_end");
+	}
+	assert.equal(requests, 1);
+	h.advance(60_001);
+	await h.emit("agent_end");
+	assert.equal(requests, 2);
+	h.advance(60_001);
+	await h.emit("agent_end");
+	assert.equal(requests, 2);
+	h.advance(60_001);
+	await h.emit("agent_end");
+	assert.equal(requests, 3);
+});
+
+test("same-provider account changes clear previous quota and error state", async () => {
+	let key = "account-a";
+	let requests = 0;
+	const h = harness({
+		credentials: async () => key,
+		fetch: async () => {
+			requests++;
+			return key === "account-a" ? success() : new Response("denied", { status: 403 });
+		},
+	});
+	await h.emit();
+	assert.match(h.text, /25%/);
+	key = "account-b";
+	await h.emit("agent_end");
+	assert.match(h.text, /403/);
+	assert.doesNotMatch(h.text, /25%|stale data/);
+	key = "account-a";
+	await h.emit("agent_end");
+	assert.match(h.text, /25%/);
+	assert.doesNotMatch(h.text, /403/);
+	assert.equal(requests, 3);
+});
+
+test("account change during an in-flight quota request does not leave the old account displayed", async () => {
+	let key = "account-a";
+	let finish;
+	const h = harness({
+		credentials: async () => key,
+		fetch: async () => key === "account-a" ? new Promise(resolve => { finish = resolve; }) :
+			Response.json({ five_hour: { utilization: 80, resets_at: null } }),
+	});
+	await h.emit();
+	key = "account-b";
+	await h.emit("agent_end");
+	finish(success());
+	await new Promise(resolve => setImmediate(resolve));
+	assert.match(h.text, /80%/);
+	assert.doesNotMatch(h.text, /25%/);
+});
+
+test("credential resolution failure cannot display another account's cached usage", async () => {
+	let valid = true;
+	const h = harness({ credentials: async () => {
+		if (!valid) throw new Error("OAuth token expired");
+		return "account-a";
+	}, fetch: async () => success() });
+	await h.emit();
+	assert.match(h.text, /25%/);
+	valid = false;
+	await h.emit("agent_end");
+	assert.match(h.text, /OAuth token expired/);
+	assert.doesNotMatch(h.text, /25%|stale data/);
+});
+
+test("Antigravity does not amplify a 429 by retrying the fallback host", async () => {
+	let requests = 0;
+	const h = harness({ provider: "antigravity", key: "test-token", fetch: async () => {
+		requests++;
+		return new Response("rate limited", { status: 429 });
+	} });
+	await h.emit();
+	assert.equal(requests, 1);
+	assert.match(h.text, /429/);
 });

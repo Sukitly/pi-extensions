@@ -42,6 +42,10 @@ cp replace-pi-with-claude-code.ts ~/.pi/agent/extensions/
 cp read-url.ts ~/.pi/agent/extensions/
 cp usage-widget.ts ~/.pi/agent/extensions/
 cp oauth-accounts.ts ~/.pi/agent/extensions/
+# Required by oauth-accounts.ts and usage-widget.ts:
+mkdir -p ~/.pi/agent/extensions/shared
+cp shared/account-coordination.mjs shared/package*.json ~/.pi/agent/extensions/shared/
+npm ci --prefix ~/.pi/agent/extensions/shared --ignore-scripts
 cp tps.ts ~/.pi/agent/extensions/
 cp fix-anthropic-thinking-block-drop.ts ~/.pi/agent/extensions/
 ```
@@ -128,14 +132,18 @@ Behavior:
 - Automatically adopts existing and newly logged-in OAuth credentials from `~/.pi/agent/auth.json` into an isolated, permission-protected store (`~/.pi/agent/oauth-accounts.json`)
 - Adds a single command: `/accounts`
 - Supports switching accounts per provider without affecting other providers
-- Background Caretaker: periodically refreshes dormant tokens to prevent inactivity expiration and revocation
-- Safe switch: performs pre-flight refresh and waits for idle before swapping live credentials
+- Background Caretaker: a cross-process lease allows at most one pass per hour; automatic passes skip active accounts (Pi owns their refresh). Explicit checks have a shared one-minute cooldown.
+- Safe switch: performs pre-flight refresh and waits for the local session to become idle before swapping globally shared credentials
+- Store changes and token refreshes use cross-process transactions, including Pi’s native `auth.json.lock`; fresh credentials are re-read under the lock and rotations are persisted before unlocking
+- Refresh failures use a persistent per-account exponential cooldown; quota/identity requests share a cross-process cache and service-level rate limiter with the usage widget
+- Account lists load quota sequentially and stop scheduling when dismissed
 - Protects active credentials from overwrite when an account's token has expired or been revoked
 
-Run its tests with:
+Tests use fake HTTP and temporary credentials, including real subprocess races against Pi 1.4.0’s native auth storage. Run them with:
 
 ```bash
-NODE_PATH=~/.pi/agent/install/releases/1.3.0/node_modules node --test tests/oauth-accounts.test.mjs
+npm ci --prefix shared --ignore-scripts
+node --test tests/oauth-accounts.test.mjs tests/usage-widget.test.mjs tests/account-coordination.test.mjs
 ```
 
 ### `branch-pr-widget.ts`
@@ -443,7 +451,10 @@ Behavior:
 - Displays usage bars for primary and secondary windows when quota data is available
 - Shows reset times
 - Computes a 7-day pace delta for Anthropic-style usage windows
-- Caches usage briefly to avoid excessive requests
+- Shares a three-minute credential-scoped disk cache with `/accounts` across processes; startup does not bypass the cache
+- Serializes requests per service with a one-second minimum gap, exponential failure backoff, and shared 429 `Retry-After` cooldown
+- Never refreshes OAuth tokens for quota queries; expired credentials wait for Pi’s next real model request
+- Invalidates local quota/error state when credentials change, so switching accounts cannot reuse another account’s quota
 - Refreshes on:
   - `session_start`
   - `model_select`

@@ -6,6 +6,7 @@ import { constants as fsConstants } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
+import { withAccountTransaction, assertAccountTransaction, withCaretakerLease, sharedUsageFetch } from "./shared/account-coordination.mjs";
 
 function getAgentDir(): string {
 	return process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
@@ -22,7 +23,7 @@ const MESSAGE_TYPE = "oauth-accounts";
 // 1. When switching to an account: refresh if it expires within 5 minutes (or is expired)
 const SWITCH_REFRESH_THRESHOLD_MS = 5 * 60 * 1000;
 // 2. Background caretaker: refresh dormant accounts if they expire within 3 hours
-const CARETAKER_REFRESH_THRESHOLD_MS = 3 * 60 * 60 * 1000;
+// Actual thresholds are deterministically staggered per account (2.5–4.5 hours).
 // 3. Periodic background check interval: 1 hour
 const CARETAKER_INTERVAL_MS = 60 * 60 * 1000;
 // 4. Usage cache TTL: 3 minutes
@@ -47,6 +48,8 @@ export interface StoredAccount {
 	addedAt: number;
 	lastUsedAt: number;
 	lastRefreshedAt?: number;
+	nextRefreshAttemptAt?: number;
+	refreshFailures?: number;
 	status: "valid" | "expired";
 	statusError?: string;
 	lastRefreshError?: string;
@@ -83,30 +86,12 @@ interface CodexUsageResponse {
 	} | null;
 }
 
-// Simple asynchronous mutex to serialize all store and auth file writes
-export class AsyncLock {
-	private promise: Promise<void> = Promise.resolve();
-
-	async run<T>(fn: () => Promise<T>): Promise<T> {
-		let release!: () => void;
-		const next = new Promise<void>((resolve) => {
-			release = resolve;
-		});
-		const prev = this.promise;
-		this.promise = next;
-		await prev;
-		try {
-			return await fn();
-		} finally {
-			release();
-		}
-	}
-}
-
-export const storeLock = new AsyncLock();
+// Shared account/auth transaction, re-entrant only within the owning async operation.
+export const storeLock = { run: withAccountTransaction };
 
 const usageCache = new Map<string, { summary: string; fetchedAt: number }>();
 let caretakerTimer: NodeJS.Timeout | null = null;
+let caretakerController: AbortController | null = null;
 let isCaretakerRunning = false;
 let pendingLoginProvider: string | null = null;
 
@@ -149,7 +134,10 @@ export async function readCurrentAuth(): Promise<AuthFile> {
 }
 
 export async function writeCurrentAuth(auth: AuthFile): Promise<void> {
-	await writePrivateJson(getAuthFile(), auth);
+	await storeLock.run(async () => {
+		assertAccountTransaction();
+		await writePrivateJson(getAuthFile(), auth);
+	});
 }
 
 export async function loadAccountsStore(): Promise<AccountsStore> {
@@ -194,7 +182,10 @@ export async function loadAccountsStore(): Promise<AccountsStore> {
 }
 
 export async function saveAccountsStore(store: AccountsStore): Promise<void> {
-	await writePrivateJson(getAccountsFile(), store);
+	await storeLock.run(async () => {
+		assertAccountTransaction();
+		await writePrivateJson(getAccountsFile(), store);
+	});
 }
 
 // ============================================================================
@@ -251,7 +242,7 @@ async function fetchAnthropicProfile(token: string): Promise<{ email?: string; d
 	if (cached) return cached;
 
 	try {
-		const response = await fetch("https://api.anthropic.com/api/oauth/profile", {
+		const response = await sharedUsageFetch("https://api.anthropic.com/api/oauth/profile", {
 			method: "GET",
 			headers: {
 				Accept: "application/json",
@@ -447,7 +438,7 @@ interface WindowUsageItem {
 
 async function fetchAnthropicUsage(token: string): Promise<UsageResponse | null> {
 	try {
-		const response = await fetch("https://api.anthropic.com/api/oauth/usage", {
+		const response = await sharedUsageFetch("https://api.anthropic.com/api/oauth/usage", {
 			method: "GET",
 			headers: {
 				Accept: "application/json",
@@ -468,7 +459,7 @@ async function fetchCodexUsage(token: string, accountId: string | undefined): Pr
 	if (!accountId) return null;
 	try {
 		const userAgent = typeof navigator !== "undefined" ? `pi (${navigator.platform || "unknown"})` : "pi";
-		const response = await fetch("https://chatgpt.com/backend-api/wham/usage", {
+		const response = await sharedUsageFetch("https://chatgpt.com/backend-api/wham/usage", {
 			method: "GET",
 			headers: {
 				Accept: "*/*",
@@ -513,7 +504,9 @@ async function fetchAnthropicUsageItems(token: string): Promise<WindowUsageItem[
 }
 
 export async function getAccountUsageSummary(account: StoredAccount): Promise<string | null> {
-	const cached = usageCache.get(account.id);
+	if (Date.now() >= account.credential.expires) return null;
+	const cacheKey = `${account.id}:${fingerprintToken(account.credential.access)}`;
+	const cached = usageCache.get(cacheKey);
 	if (cached && Date.now() - cached.fetchedAt < USAGE_CACHE_TTL_MS) {
 		return cached.summary;
 	}
@@ -530,7 +523,7 @@ export async function getAccountUsageSummary(account: StoredAccount): Promise<st
 	if (!items || items.length === 0) return null;
 
 	const summary = items.map((it) => `${it.label} ${it.percent}%`).join(" · ");
-	usageCache.set(account.id, { summary, fetchedAt: Date.now() });
+	usageCache.set(cacheKey, { summary, fetchedAt: Date.now() });
 	return summary;
 }
 
@@ -671,6 +664,8 @@ export async function syncLiveToStore(): Promise<AccountsStore> {
 					byRefresh.status = "valid";
 					byRefresh.statusError = undefined;
 					byRefresh.lastRefreshError = undefined;
+					byRefresh.nextRefreshAttemptAt = 0;
+					byRefresh.refreshFailures = 0;
 					byRefresh.lastUsedAt = Date.now();
 					modified = true;
 				}
@@ -698,6 +693,8 @@ export async function syncLiveToStore(): Promise<AccountsStore> {
 					matched.status = "valid";
 					matched.statusError = undefined;
 					matched.lastRefreshError = undefined;
+					matched.nextRefreshAttemptAt = 0;
+					matched.refreshFailures = 0;
 					matched.lastUsedAt = Date.now();
 					modified = true;
 				}
@@ -757,153 +754,130 @@ export async function syncLiveToStore(): Promise<AccountsStore> {
 /**
  * Refreshes an account's token using the native provider implementation.
  */
+type RefreshResult = { success: boolean; credential?: OAuthCredentialPayload; error?: string; fatal?: boolean; unsupported?: boolean };
+
+// All refresh entry points share the same transaction as Pi's native auth store.
+// Re-read after locking, and persist rotated credentials before releasing the lock.
 async function refreshSingleAccount(
 	account: StoredAccount,
 	modelRegistry: any,
-	signal: AbortSignal,
-): Promise<{ success: boolean; credential?: OAuthCredentialPayload; error?: string; fatal?: boolean; unsupported?: boolean }> {
-	const provider = modelRegistry?.getProvider?.(account.provider);
-	if (!provider) {
-		return { success: false, unsupported: true, error: `Provider "${account.provider}" is not currently loaded in runtime` };
-	}
-
-	const refreshFn = provider.auth?.oauth?.refresh;
-	if (typeof refreshFn !== "function") {
-		return { success: false, unsupported: true, error: `Provider "${account.provider}" does not expose OAuth refresh` };
-	}
-
-	try {
-		const refreshed = (await refreshFn(account.credential, signal)) as OAuthCredentialPayload;
-		if (!refreshed || !refreshed.access || !refreshed.refresh) {
-			return { success: false, error: "Empty token returned from provider refresh", fatal: false };
+): Promise<RefreshResult> {
+	return storeLock.run(async () => {
+		const store = await syncLiveToStore();
+		const target = store.accounts[account.id];
+		if (!target) return { success: false, error: "Account was deleted" };
+		if ((target.credential.refresh !== account.credential.refresh || target.credential.access !== account.credential.access) &&
+			target.credential.expires > Date.now() + SWITCH_REFRESH_THRESHOLD_MS) {
+			return { success: true, credential: target.credential };
 		}
-		return { success: true, credential: { ...account.credential, ...refreshed, type: "oauth" } };
-	} catch (error) {
-		const msg = error instanceof Error ? error.message : String(error);
-		const fatal = isFatalOAuthError(error);
-		return { success: false, error: msg, fatal };
-	}
+		if (Date.now() < (target.nextRefreshAttemptAt ?? 0)) {
+			return { success: false, fatal: isFatalOAuthError(target.statusError || ""), error: target.lastRefreshError || target.statusError || "Refresh cooldown active" };
+		}
+		if ((target.lastRefreshedAt ?? 0) > Date.now() - 60_000 && target.credential.expires > Date.now() + SWITCH_REFRESH_THRESHOLD_MS) {
+			return { success: true, credential: target.credential };
+		}
+		const provider = modelRegistry?.getProvider?.(target.provider);
+		const refreshFn = provider?.auth?.oauth?.refresh;
+		if (typeof refreshFn !== "function") {
+			const error = `Provider "${target.provider}" does not expose OAuth refresh`;
+			if (Date.now() >= target.credential.expires) {
+				target.status = "expired";
+				target.statusError = error;
+				await saveAccountsStore(store);
+			}
+			return { success: false, unsupported: true, error };
+		}
+
+		let result: RefreshResult;
+		try {
+			// Start the timeout after acquiring the lock, not while waiting for another process.
+			const refreshed = (await refreshFn(target.credential, AbortSignal.timeout(15_000))) as OAuthCredentialPayload;
+			if (!refreshed?.access || !refreshed?.refresh || !Number.isFinite(refreshed.expires)) {
+				throw new Error("Invalid credential returned from provider refresh");
+			}
+			result = { success: true, credential: { ...target.credential, ...refreshed, type: "oauth" } };
+		} catch (error) {
+			result = { success: false, error: error instanceof Error ? error.message : String(error), fatal: isFatalOAuthError(error) };
+		}
+		if (result.success && result.credential) {
+			target.credential = result.credential;
+			target.status = "valid";
+			target.statusError = undefined;
+			target.lastRefreshError = undefined;
+			target.refreshFailures = 0;
+			target.nextRefreshAttemptAt = 0;
+			target.lastRefreshedAt = Date.now();
+			if (store.activeAccounts[target.provider] === target.id) {
+				const auth = await readCurrentAuth();
+				auth[target.provider] = result.credential;
+				await writeCurrentAuth(auth);
+			}
+		} else {
+			target.refreshFailures = (target.refreshFailures ?? 0) + 1;
+			target.nextRefreshAttemptAt = Date.now() + Math.min(60_000 * 2 ** Math.min(target.refreshFailures - 1, 6), 3_600_000);
+			target.lastRefreshError = result.error;
+			if (result.fatal || Date.now() >= target.credential.expires) {
+				target.status = "expired";
+				target.statusError = result.error;
+			}
+		}
+		await saveAccountsStore(store);
+		return result;
+	});
 }
 
-/**
- * Global Caretaker: checks and refreshes all dormant tokens across ALL providers
- * to prevent inactivity expiration and keep tokens fresh.
- *
- * Concurrency safety:
- * - Refreshes run outside the store lock.
- * - Updates are committed inside withStoreLock, re-validating account existence and patching selectively.
- */
+/** One pass per hour across all processes; normal passes only refresh dormant accounts. */
 export async function runGlobalCaretaker(
 	modelRegistry: any,
 	options: { force?: boolean; signal?: AbortSignal; skipDelay?: boolean } = {},
 ): Promise<{ refreshed: string[]; failed: string[]; skipped: string[] }> {
-	if (isCaretakerRunning) {
-		return { refreshed: [], failed: [], skipped: [] };
-	}
+	const empty = { refreshed: [] as string[], failed: [] as string[], skipped: [] as string[] };
+	if (isCaretakerRunning) return empty;
 	isCaretakerRunning = true;
-
-	const refreshed: string[] = [];
-	const failed: string[] = [];
-	const skipped: string[] = [];
-	const trippedProviders = new Set<string>();
-	const lastRefreshByProvider = new Map<string, number>();
-
 	try {
-		const initialStore = await syncLiveToStore();
-
-		for (const accountSnapshot of Object.values(initialStore.accounts)) {
-			if (options.signal?.aborted) break;
-
-			// Circuit breaker: if previous account hit rate limit, stop hitting this provider
-			if (trippedProviders.has(accountSnapshot.provider)) {
-				failed.push(`${accountSnapshot.provider}/${accountSnapshot.alias}: Rate limit circuit breaker active; skipped.`);
-				continue;
-			}
-
-			const thresholdMs = getAccountCaretakerThresholdMs(accountSnapshot);
-			const expiresSoon =
-				options.force ||
-				Date.now() + thresholdMs >= accountSnapshot.credential.expires;
-
-			if (!expiresSoon) {
-				skipped.push(accountSnapshot.alias);
-				continue;
-			}
-
-			// Anti-burst jitter: if another account for the same provider was already refreshed in this pass,
-			// insert randomized delay (6-15s) to avoid multi-account burst detection
-			if (!options.skipDelay && lastRefreshByProvider.has(accountSnapshot.provider)) {
-				const delayMs = randomJitterMs(6, 15);
-				await sleep(delayMs, options.signal);
+		return (await withCaretakerLease(async () => {
+			const report = { refreshed: [] as string[], failed: [] as string[], skipped: [] as string[] };
+			const trippedProviders = new Set<string>();
+			const attemptedProviders = new Set<string>();
+			const initialStore = await syncLiveToStore();
+			for (const snapshot of Object.values(initialStore.accounts)) {
 				if (options.signal?.aborted) break;
-			}
-
-			lastRefreshByProvider.set(accountSnapshot.provider, Date.now());
-
-			// Perform network refresh outside store lock
-			const timeoutSignal = AbortSignal.any([AbortSignal.timeout(15000), options.signal ?? AbortSignal.timeout(30000)]);
-			const result = await refreshSingleAccount(accountSnapshot, modelRegistry, timeoutSignal);
-
-			if (!result.success && isRateLimitError(result.error)) {
-				trippedProviders.add(accountSnapshot.provider);
-			}
-
-			// Commit result with lock
-			await storeLock.run(async () => {
-				const store = await loadAccountsStore();
-				const target = store.accounts[accountSnapshot.id];
-				if (!target) return; // Account was deleted while refreshing
-
-				if (result.success && result.credential) {
-					target.credential = result.credential;
-					target.status = "valid";
-					target.statusError = undefined;
-					target.lastRefreshError = undefined;
-					target.lastRefreshedAt = Date.now();
-					refreshed.push(`${target.provider}/${target.alias}`);
-
-					// If this account is active in auth.json, update auth.json too
-					if (store.activeAccounts[target.provider] === target.id) {
-						const auth = await readCurrentAuth();
-						auth[target.provider] = result.credential;
-						await writeCurrentAuth(auth);
-					}
-					await saveAccountsStore(store);
-				} else if (result.unsupported) {
-					if (Date.now() >= target.credential.expires) {
-						target.status = "expired";
-						target.statusError = result.error;
-						failed.push(`${target.provider}/${target.alias}: ${result.error}`);
-						await saveAccountsStore(store);
-					} else {
-						skipped.push(`${target.alias} (unsupported)`);
-					}
-				} else if (result.fatal) {
-					// Definitive authorization failure (invalid_grant)
-					target.status = "expired";
-					target.statusError = result.error;
-					failed.push(`${target.provider}/${target.alias}: ${result.error}`);
-					await saveAccountsStore(store);
-				} else {
-					// Transient network error
-					target.lastRefreshError = result.error;
-					if (Date.now() >= target.credential.expires) {
-						target.status = "expired";
-						target.statusError = `Expired and network refresh failed: ${result.error}`;
-						failed.push(`${target.provider}/${target.alias}: ${result.error}`);
-					} else {
-						target.status = "valid"; // Still valid!
-						failed.push(`${target.provider}/${target.alias} (transient): ${result.error}`);
-					}
-					await saveAccountsStore(store);
+				if (trippedProviders.has(snapshot.provider)) {
+					report.failed.push(`${snapshot.provider}/${snapshot.alias}: Rate limit circuit breaker active; skipped.`);
+					continue;
 				}
-			});
-		}
+				if (!options.skipDelay && attemptedProviders.has(snapshot.provider)) {
+					await sleep(randomJitterMs(6, 15), options.signal);
+				}
+				if (options.signal?.aborted) break;
+				await storeLock.run(async () => {
+					if (options.signal?.aborted) return;
+					const latest = await syncLiveToStore();
+					const account = latest.accounts[snapshot.id];
+					if (!account) return;
+					if ((!options.force && latest.activeAccounts[account.provider] === account.id) ||
+						(!options.force && Date.now() + getAccountCaretakerThresholdMs(account) < account.credential.expires) ||
+						Date.now() < (account.nextRefreshAttemptAt ?? 0) ||
+						(account.lastRefreshedAt ?? 0) > Date.now() - 60_000) {
+						report.skipped.push(account.alias);
+						return;
+					}
+					attemptedProviders.add(account.provider);
+					// Once rotation starts, finish persistence even if the session closes.
+					const result = await refreshSingleAccount(account, modelRegistry);
+					if (result.success) report.refreshed.push(`${account.provider}/${account.alias}`);
+					else if (result.unsupported) report.skipped.push(account.alias);
+					else {
+						report.failed.push(`${account.provider}/${account.alias}: ${result.error}`);
+						if (isRateLimitError(result.error)) trippedProviders.add(account.provider);
+					}
+				});
+			}
+			return report;
+		}, options)) ?? empty;
 	} finally {
 		isCaretakerRunning = false;
 	}
-
-	return { refreshed, failed, skipped };
 }
 
 /**
@@ -914,103 +888,49 @@ export async function runGlobalCaretaker(
  * 4. Writes target account into auth.json[provider].
  * 5. Reloads ModelRuntime.
  */
+async function reloadRuntime(modelRegistry: any): Promise<void> {
+	// Must run OUTSIDE the auth transaction: runtime reload takes auth.json.lock.
+	try { modelRegistry?.runtime?.credentials?.store?.reload?.(); } catch {}
+	try { await modelRegistry?.refresh?.({ allowNetwork: false }); } catch {}
+}
+
 export async function switchAccount(
 	ctx: ExtensionCommandContext | ExtensionContext,
 	targetAccountId: string,
 ): Promise<{ ok: boolean; message: string }> {
-	// 1. Wait for agent to finish any active turn
-	if (ctx && typeof (ctx as any).waitForIdle === "function") {
-		try {
-			await (ctx as any).waitForIdle();
-		} catch {}
-	}
-
-	// 2. Synchronize current live token
-	await syncLiveToStore();
-
-	const initialStore = await loadAccountsStore();
-	const targetSnapshot = initialStore.accounts[targetAccountId];
-	if (!targetSnapshot) {
-		return { ok: false, message: `Account "${targetAccountId}" not found.` };
-	}
-
-	const providerId = targetSnapshot.provider;
-	const isExpired = Date.now() >= targetSnapshot.credential.expires;
-	const expiresSoon = Date.now() + SWITCH_REFRESH_THRESHOLD_MS >= targetSnapshot.credential.expires;
-
-	let updatedCredential = targetSnapshot.credential;
-	let warningNote = "";
-
-	// 3. Pre-flight refresh if expired or expiring soon
-	if (expiresSoon) {
-		const refreshRes = await refreshSingleAccount(
-			targetSnapshot,
-			(ctx as any).modelRegistry,
-			AbortSignal.timeout(15000),
-		);
-
-		if (refreshRes.success && refreshRes.credential) {
-			updatedCredential = refreshRes.credential;
-		} else if (refreshRes.fatal || isExpired) {
-			// Permanent failure OR already expired and refresh failed
-			await storeLock.run(async () => {
-				const store = await loadAccountsStore();
-				const target = store.accounts[targetAccountId];
-				if (target) {
-					target.status = "expired";
-					target.statusError = refreshRes.error;
-					await saveAccountsStore(store);
-				}
-			});
-			return {
-				ok: false,
-				message: `Account "${targetSnapshot.alias}" authorization failed (${refreshRes.error || "invalid_grant"}). Please re-authenticate via /login.`,
-			};
-		} else {
-			// Transient network error, but access token is still within validity!
-			warningNote = ` (Note: background refresh timed out, using valid access token)`;
-		}
-	}
-
-	// 4. Atomic switch under lock
-	return storeLock.run(async () => {
-		const store = await loadAccountsStore();
+	if (typeof (ctx as any)?.waitForIdle === "function") await (ctx as any).waitForIdle();
+	const result = await storeLock.run(async () => {
+		const store = await syncLiveToStore();
 		const target = store.accounts[targetAccountId];
-		if (!target) {
-			return { ok: false, message: `Account "${targetAccountId}" not found.` };
+		if (!target) return { ok: false, message: `Account "${targetAccountId}" not found.` };
+		let warningNote = "";
+		if (Date.now() + SWITCH_REFRESH_THRESHOLD_MS >= target.credential.expires) {
+			const refreshed = await refreshSingleAccount(target, (ctx as any).modelRegistry);
+			if (refreshed.success && refreshed.credential) {
+				target.credential = refreshed.credential;
+			} else if (refreshed.fatal || Date.now() >= target.credential.expires) {
+				return { ok: false, message: `Account "${target.alias}" authorization failed (${refreshed.error}). Please re-authenticate via /login.` };
+			} else {
+				warningNote = " (Refresh unavailable; using valid access token)";
+			}
 		}
-
-		target.credential = updatedCredential;
-		target.lastUsedAt = Date.now();
-		if (updatedCredential !== targetSnapshot.credential) {
-			target.status = "valid";
-			target.statusError = undefined;
-			target.lastRefreshedAt = Date.now();
-		}
-		store.activeAccounts[providerId] = target.id;
-		await saveAccountsStore(store);
-
-		// Write only this provider to auth.json, leaving all other providers intact
+		// refreshSingleAccount persisted status/backoff; do not overwrite it with the old snapshot.
+		const latest = await loadAccountsStore();
+		const selected = latest.accounts[target.id];
+		selected.lastUsedAt = Date.now();
+		latest.activeAccounts[target.provider] = selected.id;
 		const auth = await readCurrentAuth();
-		auth[providerId] = target.credential;
+		auth[target.provider] = selected.credential;
+		// auth is authoritative; syncLiveToStore can recover if the following store write fails.
 		await writeCurrentAuth(auth);
-
-		// 5. Reload runtime
-		try {
-			const runtime = ((ctx as any).modelRegistry as any)?.runtime;
-			runtime?.credentials?.store?.reload?.();
-		} catch {}
-		try {
-			await (ctx as any).modelRegistry?.refresh?.();
-		} catch {}
-
-		const displayAccount = target.email && target.alias !== target.email
-			? `${target.alias} (${target.email})`
-			: (target.email || target.alias);
-		lastKnownActiveAccountByProvider.set(providerId, target.id);
-
-		return { ok: true, message: `Account: ${displayAccount}${warningNote}` };
+		await saveAccountsStore(latest);
+		lastKnownActiveAccountByProvider.set(target.provider, selected.id);
+		const display = selected.email && selected.alias !== selected.email
+			? `${selected.alias} (${selected.email})` : (selected.email || selected.alias);
+		return { ok: true, message: `Account: ${display}${warningNote}` };
 	});
+	if (result.ok) await reloadRuntime((ctx as any).modelRegistry);
+	return result;
 }
 
 /**
@@ -1019,8 +939,8 @@ export async function switchAccount(
  * - Triggers modelRegistry.refresh() to reflect logout.
  */
 export async function deleteAccount(accountId: string, modelRegistry?: any): Promise<boolean> {
-	return storeLock.run(async () => {
-		const store = await loadAccountsStore();
+	const removed = await storeLock.run(async () => {
+		const store = await syncLiveToStore();
 		const acc = store.accounts[accountId];
 		if (!acc) return false;
 
@@ -1037,19 +957,13 @@ export async function deleteAccount(accountId: string, modelRegistry?: any): Pro
 				await writeCurrentAuth(auth);
 			}
 
-			if (modelRegistry) {
-				try {
-					(modelRegistry as any)?.runtime?.credentials?.store?.reload?.();
-				} catch {}
-				try {
-					await modelRegistry.refresh?.();
-				} catch {}
-			}
 		}
 
 		await saveAccountsStore(store);
 		return true;
 	});
+	if (removed) await reloadRuntime(modelRegistry);
+	return removed;
 }
 
 /**
@@ -1245,7 +1159,7 @@ async function runProviderAccountsMenu(ctx: ExtensionCommandContext, providerId:
 				const isActive = acc.id === activeId;
 				const displayTitle = acc.email || acc.alias;
 				const label = isActive ? `● ${displayTitle} (active)` : `○ ${displayTitle}`;
-				const cachedUsage = usageCache.get(acc.id)?.summary;
+				const cachedUsage = usageCache.get(`${acc.id}:${fingerprintToken(acc.credential.access)}`)?.summary;
 				items.push({
 					label,
 					value: `acc:${acc.id}`,
@@ -1255,11 +1169,14 @@ async function runProviderAccountsMenu(ctx: ExtensionCommandContext, providerId:
 			return items;
 		};
 
+		let menuOpen = true;
 		const selected = await showCustomSelect(ctx, `Accounts for ${providerId}:`, buildItems(), (updateItems) => {
-			for (const acc of accounts) {
-				void Promise.all([
-					ensureAccountIdentity(acc).then(async (mod) => {
-						if (mod) {
+			// Do not enqueue a burst for every account. Stop scheduling when the menu closes.
+			void (async () => {
+				for (const acc of accounts) {
+					if (!menuOpen) break;
+					try {
+						if (await ensureAccountIdentity(acc)) {
 							await storeLock.run(async () => {
 								const latest = await loadAccountsStore();
 								if (latest.accounts[acc.id]) {
@@ -1269,17 +1186,14 @@ async function runProviderAccountsMenu(ctx: ExtensionCommandContext, providerId:
 									await saveAccountsStore(latest);
 								}
 							});
-							updateItems(buildItems());
 						}
-					}),
-					!usageCache.has(acc.id)
-						? getAccountUsageSummary(acc).then((summary) => {
-								if (summary) updateItems(buildItems());
-						  })
-						: Promise.resolve(),
-				]);
-			}
-		});
+						if (!menuOpen) break;
+						await getAccountUsageSummary(acc);
+						if (menuOpen) updateItems(buildItems());
+					} catch { /* Quota/identity enrichment is best-effort. */ }
+				}
+			})();
+		}).finally(() => { menuOpen = false; });
 
 		if (!selected) return;
 
@@ -1334,36 +1248,13 @@ async function runAccountActionMenu(ctx: ExtensionCommandContext, account: Store
 		}
 	} else if (choice === "refresh") {
 		ctx.ui.notify(`Refreshing "${account.alias}"...`, "info");
-		const res = await refreshSingleAccount(account, (ctx as any).modelRegistry, AbortSignal.timeout(15000));
-		await storeLock.run(async () => {
-			const latestStore = await loadAccountsStore();
-			const target = latestStore.accounts[account.id];
-			if (!target) return;
-
-			if (res.success && res.credential) {
-				target.credential = res.credential;
-				target.status = "valid";
-				target.statusError = undefined;
-				target.lastRefreshError = undefined;
-				target.lastRefreshedAt = Date.now();
-				if (latestStore.activeAccounts[target.provider] === target.id) {
-					const auth = await readCurrentAuth();
-					auth[target.provider] = res.credential;
-					await writeCurrentAuth(auth);
-				}
-				await saveAccountsStore(latestStore);
-				ctx.ui.notify(`Token refreshed successfully. Valid ${formatRelativeTime(target.credential.expires)}.`, "info");
-			} else if (res.fatal) {
-				target.status = "expired";
-				target.statusError = res.error;
-				await saveAccountsStore(latestStore);
-				ctx.ui.notify(`Refresh failed: ${res.error}. Please re-authenticate via /login.`, "error");
-			} else {
-				target.lastRefreshError = res.error;
-				await saveAccountsStore(latestStore);
-				ctx.ui.notify(`Refresh error (transient): ${res.error}.`, "warning");
-			}
-		});
+		const res = await refreshSingleAccount(account, (ctx as any).modelRegistry);
+		if (res.success) {
+			await reloadRuntime((ctx as any).modelRegistry);
+			ctx.ui.notify("Token refreshed successfully.", "info");
+		} else {
+			ctx.ui.notify(`Refresh failed: ${res.error}`, res.fatal ? "error" : "warning");
+		}
 	} else if (choice === "rename") {
 		const newAlias = await ctx.ui.input("Enter new alias:", account.alias);
 		if (newAlias && newAlias.trim()) {
@@ -1473,15 +1364,21 @@ export default function (pi: ExtensionAPI) {
 			}
 		} catch {}
 
-		void runGlobalCaretaker((ctx as any).modelRegistry).catch(() => {});
-
+		caretakerController?.abort();
+		const controller = new AbortController();
+		caretakerController = controller;
+		const registry = (ctx as any).modelRegistry;
+		const run = () => {
+			if (!controller.signal.aborted) void runGlobalCaretaker(registry, { signal: controller.signal }).catch(() => {});
+		};
+		run();
 		if (caretakerTimer) clearInterval(caretakerTimer);
-		caretakerTimer = setInterval(() => {
-			void runGlobalCaretaker((ctx as any).modelRegistry).catch(() => {});
-		}, CARETAKER_INTERVAL_MS);
+		caretakerTimer = setInterval(run, CARETAKER_INTERVAL_MS);
 	});
 
 	pi.on("session_shutdown", () => {
+		caretakerController?.abort();
+		caretakerController = null;
 		if (caretakerTimer) {
 			clearInterval(caretakerTimer);
 			caretakerTimer = null;

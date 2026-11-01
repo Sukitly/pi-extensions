@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { sharedUsageFetch, getUsageApiKey } from "./shared/account-coordination.mjs";
 
 interface UsageWindow {
 	label: string;
@@ -401,7 +402,7 @@ async function requireUsageResponse(response: Response): Promise<unknown> {
 }
 
 async function fetchAnthropicUsage(apiKey: string): Promise<UsageResponse> {
-	const response = await fetch("https://api.anthropic.com/api/oauth/usage", {
+	const response = await sharedUsageFetch("https://api.anthropic.com/api/oauth/usage", {
 		method: "GET",
 		headers: {
 			Accept: "application/json",
@@ -418,7 +419,7 @@ async function fetchCodexUsage(apiKey: string): Promise<UsageResponse> {
 	const accountId = extractCodexAccountId(apiKey);
 	if (!accountId) throw new Error("Missing ChatGPT account ID in Codex credentials; please log in again");
 	const userAgent = typeof navigator !== "undefined" ? `pi (${navigator.platform || "unknown"})` : "pi";
-	const response = await fetch("https://chatgpt.com/backend-api/wham/usage", {
+	const response = await sharedUsageFetch("https://chatgpt.com/backend-api/wham/usage", {
 		method: "GET",
 		headers: {
 			Accept: "*/*",
@@ -444,7 +445,7 @@ async function fetchAntigravityUsage(apiKey: string): Promise<UsageResponse> {
 	let lastError: unknown;
 	for (const endpoint of ANTIGRAVITY_ENDPOINT_FALLBACKS) {
 		try {
-			const response = await fetch(`${endpoint}/v1internal:retrieveUserQuotaSummary`, {
+			const response = await sharedUsageFetch(`${endpoint}/v1internal:retrieveUserQuotaSummary`, {
 				method: "POST",
 				headers: {
 					Accept: "application/json",
@@ -459,7 +460,7 @@ async function fetchAntigravityUsage(apiKey: string): Promise<UsageResponse> {
 			return normalizeAntigravityUsage(data);
 		} catch (error) {
 			lastError = error;
-			if (error instanceof Error && error.message.includes("403")) {
+			if (error instanceof Error && /403|429/.test(error.message)) {
 				throw error;
 			}
 		}
@@ -475,7 +476,7 @@ const OPENCODE_GO_STATUS_ENDPOINT = "https://opencode.ai/console/api/go/status";
 async function fetchOpenCodeGoUsage(apiKey: string): Promise<UsageResponse> {
 	if (!apiKey) throw new Error("Missing OpenCode Go API key; please configure credentials");
 
-	const response = await fetch(OPENCODE_GO_STATUS_ENDPOINT, {
+	const response = await sharedUsageFetch(OPENCODE_GO_STATUS_ENDPOINT, {
 		method: "GET",
 		headers: {
 			Accept: "application/json",
@@ -516,6 +517,9 @@ export default function (pi: ExtensionAPI) {
 	const usageCache = new Map<string, { data: UsageResponse; refreshedAt: number }>();
 	const usageRefreshes = new Map<string, Promise<void>>();
 	const usageErrors = new Map<string, string>();
+	const credentialKeys = new Map<string, string>();
+	const retryAfter = new Map<string, number>();
+	const failures = new Map<string, number>();
 	let activeProvider: string | null = null;
 	let lifecycleToken = 0;
 
@@ -580,47 +584,58 @@ export default function (pi: ExtensionAPI) {
 		});
 	}
 
-	async function refreshUsage(ctx: ExtensionContext, provider: string | null, force = false) {
+	async function refreshUsage(ctx: ExtensionContext, provider: string | null, token: number) {
 		if (!provider || !supportsUsageWidget(provider)) return;
-		const cached = usageCache.get(provider);
-		if (!force && !usageErrors.has(provider) && cached && Date.now() - cached.refreshedAt < MIN_REFRESH_GAP_MS) return;
-		const existingRefresh = usageRefreshes.get(provider);
-		if (existingRefresh) {
-			await existingRefresh;
-			return;
-		}
-
-		// Capture the registry before detaching: reading ctx after a reload can throw.
+		// Capture before awaiting; a session reload invalidates ctx.
 		const modelRegistry = ctx.modelRegistry;
+		while (usageRefreshes.has(provider)) await usageRefreshes.get(provider);
+		if (!isCurrent(token, provider)) return;
 		const refresh = (async () => {
 			let apiKey: string | undefined;
 			try {
-				apiKey = await modelRegistry.getApiKeyForProvider(provider);
+				apiKey = await getUsageApiKey(modelRegistry, provider);
+				if (!isCurrent(token, provider)) return;
 				if (!apiKey) throw new Error("No API credentials available; please log in");
+				if (credentialKeys.get(provider) !== apiKey) {
+					credentialKeys.set(provider, apiKey);
+					usageCache.delete(provider);
+					usageErrors.delete(provider);
+					retryAfter.delete(provider);
+					failures.delete(provider);
+				}
+				const cached = usageCache.get(provider);
+				if (Date.now() < (retryAfter.get(provider) ?? 0)) return;
+				if (cached && !usageErrors.has(provider) && Date.now() - cached.refreshedAt < MIN_REFRESH_GAP_MS) return;
 				const data = await fetchUsage(provider, apiKey);
 				if (data) {
 					usageCache.set(provider, { data, refreshedAt: Date.now() });
 					usageErrors.delete(provider);
+					retryAfter.delete(provider);
+					failures.delete(provider);
 				}
 			} catch (error) {
+				if (!apiKey) {
+					// The account may have changed or logged out; its identity is unknown.
+					usageCache.delete(provider);
+					credentialKeys.delete(provider);
+				}
 				usageErrors.set(provider, formatUsageError(error, apiKey));
+				const count = (failures.get(provider) ?? 0) + 1;
+				failures.set(provider, count);
+				retryAfter.set(provider, Date.now() + Math.min(60_000 * 2 ** Math.min(count - 1, 4), 900_000));
 			}
 		})();
 		usageRefreshes.set(provider, refresh);
-		try {
-			await refresh;
-		} finally {
-			if (usageRefreshes.get(provider) === refresh) usageRefreshes.delete(provider);
-		}
+		try { await refresh; }
+		finally { if (usageRefreshes.get(provider) === refresh) usageRefreshes.delete(provider); }
 	}
 
 	function refreshInBackground(
 		ctx: ExtensionContext,
 		provider: string,
 		token: number,
-		force = false,
 	) {
-		void refreshUsage(ctx, provider, force)
+		void refreshUsage(ctx, provider, token)
 			.then(() => {
 				if (!isCurrent(token, provider)) return;
 				showWidget(ctx, provider);
@@ -638,19 +653,19 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", (_event, ctx) => {
 		if (!ctx.hasUI) return;
 		const provider = ctx.model?.provider ?? null;
-		const token = lifecycleToken;
+		const token = ++lifecycleToken;
 		activeProvider = provider;
 
 		showWidget(ctx, provider);
 		if (supportsUsageWidget(provider)) {
-			refreshInBackground(ctx, provider, token, true);
+			refreshInBackground(ctx, provider, token);
 		}
 	});
 
 	pi.on("agent_end", (_event, ctx) => {
 		if (!ctx.hasUI) return;
 		const provider = activeProvider;
-		const token = lifecycleToken;
+		const token = ++lifecycleToken;
 
 		if (provider === "openai") {
 			showWidget(ctx, provider);
@@ -662,7 +677,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("model_select", (event, ctx) => {
 		if (!ctx.hasUI) return;
 		const provider = event.model.provider;
-		const token = lifecycleToken;
+		const token = ++lifecycleToken;
 		activeProvider = provider;
 
 		showWidget(ctx, provider, event.model.id);
