@@ -103,7 +103,7 @@ export function buildCommandCodeProvider(index: ChatCatalogIndex): Provider {
 		id: PROVIDER_ID,
 		name: PROVIDER_NAME,
 		baseUrl: BASE_URL,
-		auth: envApiKeyAuth(`${PROVIDER_NAME} API key`, ["COMMAND_CODE_API_KEY"]),
+		auth: { apiKey: envApiKeyAuth(`${PROVIDER_NAME} API key`, ["COMMAND_CODE_API_KEY"]) },
 		models: fallbackModels(index),
 		fetchModels,
 		api: {

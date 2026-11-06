@@ -1,7 +1,6 @@
 // Tests: provider wiring (native api_key auth via Pi's envApiKeyAuth, native
 // protocol implementations, fetchModels freshness/fallback semantics).
 import { inspect } from "node:util";
-import { createProvider, envApiKeyAuth } from "@earendil-works/pi-ai";
 import {
   BASE_URL,
   buildChatCatalogIndex,
@@ -36,7 +35,14 @@ function eq(actual: unknown, expected: unknown, message: string): void {
 // native credential resolution (no OAuth fake, no private credential file)
 // ---------------------------------------------------------------------------
 
-const auth = envApiKeyAuth(`${PROVIDER_NAME} API key`, ["COMMAND_CODE_API_KEY"]);
+const builtinIndex = buildChatCatalogIndex(
+  getBuiltinProviders().flatMap((provider) => getBuiltinModels(provider)),
+);
+const provider = buildCommandCodeProvider(builtinIndex);
+const auth = provider.auth.apiKey;
+ok(auth !== undefined, "registered provider exposes native api_key auth");
+ok(provider.auth.oauth === undefined, "registered provider does not advertise OAuth");
+if (!auth) throw new Error("Provider does not expose api_key auth");
 eq(auth.name, "Command Code API key", "api-key display name");
 ok(typeof auth.login === "function", "native login flow exists (Pi prompts for the key)");
 ok(typeof auth.login === "function", "native secret-prompt login wired");
@@ -69,10 +75,6 @@ eq(loginResult, { type: "api_key", key: "cc_sk_prompted_key" }, "login returns a
 // provider wiring
 // ---------------------------------------------------------------------------
 
-const builtinIndex = buildChatCatalogIndex(
-  getBuiltinProviders().flatMap((provider) => getBuiltinModels(provider)),
-);
-const provider = buildCommandCodeProvider(builtinIndex);
 eq(provider.id, PROVIDER_ID, "provider id");
 eq(provider.baseUrl, BASE_URL, "provider baseUrl routes to Command Code");
 ok(provider.refreshModels !== undefined, "provider is dynamic (fetchModels registered)");
