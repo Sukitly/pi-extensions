@@ -1,0 +1,27 @@
+{
+  "name": "pi-command-code",
+  "version": "0.1.0",
+  "description": "Command Code provider for Pi Coding Agent: native api_key login, model discovery from api.commandcode.ai, and plan usage widget",
+  "license": "MIT",
+  "type": "module",
+  "main": "./src/index.ts",
+  "keywords": [
+    "pi-extension",
+    "pi-package",
+    "commandcode",
+    "command-code",
+    "provider"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "node scripts/run-ts.mjs tests/test-model-matching.ts && node scripts/run-ts.mjs tests/test-usage.ts && node scripts/run-ts.mjs tests/test-credentials.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": ">=0.80.0",
+    "@earendil-works/pi-coding-agent": ">=0.80.0"
+  }
+}
