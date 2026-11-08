@@ -176,7 +176,7 @@ export function formatReset(resetAt: number | undefined, now = Date.now()): stri
 	return `${Math.max(0, totalMin)}m`;
 }
 
-function formatCredits(value: number | undefined): string {
+export function formatCredits(value: number | undefined): string {
 	if (value === undefined) return "?";
 	return Number.isInteger(value) ? String(value) : value.toFixed(2);
 }
@@ -216,14 +216,4 @@ export function formatUsageSummary(
 	}
 	if (opts.stale) lines.push(`  Note: ${opts.stale}`);
 	return lines.join("\n");
-}
-
-/** Single-line footer widget text. */
-export function formatUsageLine(usage: CommandCodeUsage, now = Date.now()): string {
-	const fiveHour = `${windowPercent(usage.fiveHour.used, usage.fiveHour.cap)} / ${formatReset(usage.fiveHour.resetAt, now)}`;
-	const weekly = `${windowPercent(usage.weekly.used, usage.weekly.cap)}${usage.weekly.cap === undefined && usage.weekly.used !== undefined ? ` used ${formatCredits(usage.weekly.used)}cr` : ""}`;
-	const monthly = usage.monthlyRemaining !== undefined ? `${formatCredits(usage.monthlyRemaining)}cr left` : undefined;
-	const segments = [`CC 5h ${fiveHour}`, `wk ${weekly}`];
-	if (monthly) segments.push(`mo ${monthly}`);
-	return segments.join(" · ");
 }

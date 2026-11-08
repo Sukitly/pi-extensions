@@ -10,8 +10,10 @@ as a native provider — no `models.json` edits, no changes to your `usage-widge
    - Model list is discovered live from `GET https://api.commandcode.ai/provider/v1/models`.
    - Capability metadata (context window, max tokens, reasoning, tool/image compat flags,
      `thinkingLevelMap`) is reused from **Pi's built-in model catalog** by matching the
-     Command Code model ID (with vendor prefixes stripped) or display name. Unknown vendors
-     get a conservative synthesized model built from server-declared metadata.
+     Command Code model ID (with vendor prefixes stripped) or display name **and protocol**.
+     `/thinking` is available when the matching model supports it; a protocol mismatch does
+     not copy reasoning flags. Unknown vendors get a conservative synthesized model built
+     from server-declared metadata.
    - The endpoint decides the protocol:
      - `/messages` → Pi's `anthropic-messages` implementation (Claude models)
      - `/chat/completions` → Pi's `openai-completions` implementation (GLM-5.3 Flash,
@@ -34,8 +36,9 @@ as a native provider — no `models.json` edits, no changes to your `usage-widge
    [CommandCode-Usagebar](https://github.com/berkeduruu/CommandCode-Usagebar)):
    - `/command-code.usage` prints 5-hour and weekly windows (credits used, cap, reset
      countdown) and remaining monthly credits.
-   - While a Command Code model is selected, a below-editor widget shows the same data
-     (refreshed around `agent_end`, min 3 min apart).
+   - While a Command Code model is selected, a below-editor widget uses the same
+     10-column bars, reset times, and weekly pace indicator as `usage-widget.ts`
+     (refreshed on session start and around `agent_end`, min 3 min apart).
    - **No guessed numbers.** The server does not expose a monthly total pool, so nothing is
      hard-coded (the community extension's GOAT = 70 is deliberately not reproduced);
      remaining credits are shown without a percentage. Failed refreshes show an error and a
@@ -79,6 +82,7 @@ npm test   # same as:
 node scripts/run-ts.mjs tests/test-model-matching.ts   # matching, endpoint routing, fallback
 node scripts/run-ts.mjs tests/test-usage.ts            # usage parsing/failure/format/stale
 node scripts/run-ts.mjs tests/test-credentials.ts      # native api_key auth + provider wiring
+node scripts/run-ts.mjs tests/test-widget.ts           # widget rendering and lifecycle
 ```
 
 Tests run with `node --experimental-strip-types`; the resolve hook (`scripts/register-hooks.mjs`)
