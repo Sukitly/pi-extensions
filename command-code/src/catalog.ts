@@ -37,6 +37,8 @@ export type BuiltinModelLike = Pick<
 export interface ChatCatalogIndex {
 	byId: Map<string, BuiltinModelLike>;
 	byName: Map<string, BuiltinModelLike>;
+	idVariants: Map<string, BuiltinModelLike[]>;
+	nameVariants: Map<string, BuiltinModelLike[]>;
 }
 
 export function normalizeKey(value: string): string {
@@ -55,12 +57,19 @@ export function lastPathSegment(id: string): string {
 export function buildChatCatalogIndex(models: readonly BuiltinModelLike[]): ChatCatalogIndex {
 	const byId = new Map<string, BuiltinModelLike>();
 	const byName = new Map<string, BuiltinModelLike>();
+	const idVariants = new Map<string, BuiltinModelLike[]>();
+	const nameVariants = new Map<string, BuiltinModelLike[]>();
 	for (const model of models) {
-		if (!byId.has(normalizeKey(model.id))) byId.set(normalizeKey(model.id), model);
+		const id = normalizeKey(model.id);
+		if (!byId.has(id)) byId.set(id, model);
+		idVariants.set(id, [...(idVariants.get(id) ?? []), model]);
 		const name = normalizeKey(model.name ?? "");
-		if (name && !byName.has(name)) byName.set(name, model);
+		if (name) {
+			if (!byName.has(name)) byName.set(name, model);
+			nameVariants.set(name, [...(nameVariants.get(name) ?? []), model]);
+		}
 	}
-	return { byId, byName };
+	return { byId, byName, idVariants, nameVariants };
 }
 
 export type ApiChoice = "anthropic-messages" | "openai-completions" | "openai-responses";
@@ -110,18 +119,16 @@ export function matchCommandCodeModel(
 	if (!api || !entry.id) return undefined;
 
 	const bare = lastPathSegment(entry.id);
-	let builtin = index.byId.get(normalizeKey(bare));
-	let matched: MatchResult["matched"] | undefined;
-	if (builtin) {
-		matched = "builtin-id";
-	} else {
-		builtin = index.byId.get(normalizeKey(entry.id));
-		if (builtin) matched = "builtin-id";
+	const candidates: Array<[BuiltinModelLike, "builtin-id" | "builtin-name"]> = [];
+	for (const id of [normalizeKey(bare), normalizeKey(entry.id)]) {
+		for (const model of index.idVariants.get(id) ?? []) candidates.push([model, "builtin-id"]);
 	}
-	if (!builtin) {
-		builtin = index.byName.get(normalizeKey(entry.name ?? entry.id));
-		if (builtin) matched = "builtin-name";
+	for (const model of index.nameVariants.get(normalizeKey(entry.name ?? entry.id)) ?? []) {
+		candidates.push([model, "builtin-name"]);
 	}
+	// The same model ID occurs under several providers/protocols. Prefer one
+	// that actually speaks Command Code's advertised endpoint.
+	const [builtin, matched] = candidates.find(([model]) => model.api === api) ?? candidates[0] ?? [];
 
 	const contextWindow =
 		typeof entry.context_length === "number" && entry.context_length > 0
@@ -150,12 +157,11 @@ export function matchCommandCodeModel(
 		};
 	}
 	const compatible = builtin.api === api;
+	// Never inherit a thinking map or transport flags from the wrong protocol.
+	const { thinkingLevelMap: _thinkingLevelMap, compat: _compat, inputLimits: _inputLimits, ...base } = builtin;
 
 	const model: Model<Api> = {
-		...(builtin as Model<Api>),
-		// Without an exact-ID match we cannot trust vendor-specific compat flags
-		// across a different protocol on the proxy.
-		...(compatible && builtin.reasoning ? { reasoning: true } : {}),
+		...(base as Model<Api>),
 		id: entry.id,
 		name: entry.name ?? builtin.name,
 		api,
@@ -170,6 +176,23 @@ export function matchCommandCodeModel(
 		...(compatible && builtin.compat ? { compat: builtin.compat } : {}),
 	};
 	return { model, matched: matched ?? "builtin-id" };
+}
+
+/** Rebuild capabilities for persisted models without requiring a network refresh. */
+export function refreshStoredModelMetadata(models: readonly Model<Api>[], index: ChatCatalogIndex): Model<Api>[] {
+	return models.map((model) => {
+		const endpoint = model.api === "anthropic-messages" ? "/messages"
+			: model.api === "openai-completions" ? "/chat/completions"
+			: model.api === "openai-responses" ? "/responses" : undefined;
+		if (!endpoint) return model;
+		const result = matchCommandCodeModel({
+			id: model.id,
+			name: model.name,
+			context_length: model.contextWindow,
+			supported_endpoints: [endpoint],
+		}, index);
+		return result && result.matched !== "synthesized" ? result.model : model;
+	});
 }
 
 /**

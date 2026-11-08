@@ -5,7 +5,6 @@ import {
   CreditsApiError,
   fetchCommandCodeUsage,
   formatReset,
-  formatUsageLine,
   formatUsageSummary,
   parseCredits,
   type RawCreditsResponse,
@@ -151,11 +150,6 @@ ok(summary.includes("2h 30m") || summary.includes("2h30m") || summary.includes("
 const stale = formatUsageSummary(usage, { stale: "refresh failed (HTTP 500); data may be expired", now: NOW });
 ok(stale.includes("data may be expired"), "stale marker rendered");
 
-const line = formatUsageLine(usage, NOW);
-ok(line.startsWith("CC 5h"), "widget line prefixed");
-ok(line.includes("51"), "widget line contains monthly remaining");
-const noCapLine = formatUsageLine(noCap, NOW);
-ok(noCapLine.includes("?%") || noCapLine.includes("?"), "widget line degrades without caps");
 
 eq(
   formatReset(Date.parse("2026-11-06T11:00:00Z"), NOW),

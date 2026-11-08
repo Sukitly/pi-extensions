@@ -13,6 +13,7 @@ import type {
 	ExtensionCommandContext,
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import {
 	anthropicMessagesApi,
 	createProvider,
@@ -31,15 +32,16 @@ import {
 	discoverCommandCodeModels,
 	fallbackModels,
 	isCatalogFresh,
+	refreshStoredModelMetadata,
 	PROVIDER_ID,
 	PROVIDER_NAME,
 } from "./catalog.ts";
 import {
 	fetchCommandCodeUsage,
-	formatUsageLine,
 	formatUsageSummary,
 	type CommandCodeUsage,
 } from "./usage.ts";
+import { buildCommandCodeWidgetLine } from "./widget.ts";
 
 export const WIDGET_ID = "command-code-usage";
 const MIN_USAGE_REFRESH_MS = 3 * 60 * 1000;
@@ -72,7 +74,7 @@ export function buildCommandCodeProvider(index: ChatCatalogIndex): Provider {
 	let lastKnownModels: Model[] = [];
 
 	async function fetchModels(context: RefreshModelsContext): Promise<Model[]> {
-		const stored = chatModels(context.stored?.models ?? []);
+		const stored = refreshStoredModelMetadata(chatModels(context.stored?.models ?? []), index);
 		if (stored.length > 0) lastKnownModels = stored;
 		if (context.signal.aborted) return lastKnownModels;
 
@@ -144,24 +146,21 @@ export default function (pi: ExtensionAPI): void {
 	let cachedUsage: CommandCodeUsage | undefined;
 	let usageError: string | undefined;
 	let refreshInFlight: Promise<void> | undefined;
+	let activeProvider: string | null = null;
+	let lifecycleToken = 0;
 
 	function resolveApiKey(ctx: ExtensionContext): Promise<string | undefined> {
-		return ctx.modelRegistry
-			.getApiKeyForProvider(PROVIDER_ID)
-			.catch(() => undefined);
+		return ctx.modelRegistry.getApiKeyForProvider(PROVIDER_ID);
 	}
 
 	async function refreshUsage(ctx: ExtensionContext, force = false): Promise<void> {
-		if (!cachedUsage && usageError && !force) return;
-		const cachedAt = cachedUsage?.fetchedAt ?? 0;
-		if (!force && cachedUsage && Date.now() - cachedAt < MIN_USAGE_REFRESH_MS) return;
-		if (refreshInFlight) {
-			await refreshInFlight;
-			return;
-		}
-		refreshInFlight = (async () => {
+		if (!force && !usageError && cachedUsage && Date.now() - cachedUsage.fetchedAt < MIN_USAGE_REFRESH_MS) return;
+		if (refreshInFlight) return refreshInFlight;
+		// Capture the registry before detaching; ctx may become stale after /reload.
+		const modelRegistry = ctx.modelRegistry;
+		const refresh = (async () => {
 			try {
-				const apiKey = await resolveApiKey(ctx);
+				const apiKey = await modelRegistry.getApiKeyForProvider(PROVIDER_ID);
 				if (!apiKey) throw new Error("No Command Code API key. Run /login command-code first.");
 				cachedUsage = await fetchCommandCodeUsage(apiKey);
 				usageError = undefined;
@@ -169,54 +168,63 @@ export default function (pi: ExtensionAPI): void {
 				usageError = errorMessage(error);
 			}
 		})();
+		refreshInFlight = refresh;
 		try {
-			await refreshInFlight;
+			await refresh;
 		} finally {
-			refreshInFlight = undefined;
+			if (refreshInFlight === refresh) refreshInFlight = undefined;
 		}
 	}
 
-	function widgetLines(ctx: ExtensionContext): string | undefined {
-		if (!cachedUsage && !usageError) return undefined;
-		const parts: string[] = [];
-		if (cachedUsage) parts.push(formatUsageLine(cachedUsage));
-		if (usageError) {
-			const stale = cachedUsage ? " (stale)" : "";
-			parts.push(`Command Code usage unavailable${stale}: ${usageError} — ${Math.round((Date.now() - (cachedUsage?.fetchedAt ?? Date.now())) / 60000)}m old; will retry`);
-		}
-		return parts.filter(Boolean).join("\n") || undefined;
-	}
-
-	function updateWidget(ctx: ExtensionContext, active: boolean): void {
+	function updateWidget(ctx: ExtensionContext): void {
 		if (!ctx.hasUI) return;
-		const text = active ? widgetLines(ctx) : undefined;
 		try {
-			ctx.ui.setWidget(WIDGET_ID, text, { placement: "belowEditor" });
+			if (activeProvider !== PROVIDER_ID || (!cachedUsage && !usageError)) {
+				ctx.ui.setWidget(WIDGET_ID, undefined);
+				return;
+			}
+			ctx.ui.setWidget(
+				WIDGET_ID,
+				(_tui, theme) => new Text([
+					cachedUsage ? buildCommandCodeWidgetLine(cachedUsage, theme) : "",
+					usageError ? theme.fg("error", `command-code usage: refresh failed${cachedUsage ? " (stale data)" : ""} — ${usageError}`) : "",
+				].filter(Boolean).join("\n"), 0, 0),
+				{ placement: "belowEditor" },
+			);
 		} catch (error) {
-			// Reloads can orphan contexts; widget updates are best-effort.
 			if (!String(error).includes("ctx is stale")) console.error(`[command-code] widget: ${errorMessage(error)}`);
 		}
 	}
 
+	function refreshInBackground(ctx: ExtensionContext, token: number, force = false): void {
+		void refreshUsage(ctx, force)
+			.then(() => {
+				if (token === lifecycleToken && activeProvider === PROVIDER_ID) updateWidget(ctx);
+			})
+			.catch(() => {});
+	}
+
+	pi.on("session_start", (_event, ctx) => {
+		if (!ctx.hasUI) return;
+		activeProvider = ctx.model?.provider ?? null;
+		updateWidget(ctx);
+		if (activeProvider === PROVIDER_ID) refreshInBackground(ctx, lifecycleToken, true);
+	});
+
 	pi.on("model_select", (event, ctx) => {
-		const active = event.model.provider === PROVIDER_ID;
-		updateWidget(ctx, active);
-		if (active) {
-			void refreshUsage(ctx, true)
-				.then(() => updateWidget(ctx, true))
-				.catch(() => {});
-		}
+		activeProvider = event.model.provider;
+		lifecycleToken++;
+		updateWidget(ctx);
+		if (activeProvider === PROVIDER_ID && ctx.hasUI) refreshInBackground(ctx, lifecycleToken);
 	});
 
 	pi.on("agent_end", (_event, ctx) => {
-		if (ctx.model?.provider !== PROVIDER_ID) return;
-		updateWidget(ctx, true);
-		void refreshUsage(ctx)
-			.then(() => updateWidget(ctx, true))
-			.catch(() => {});
+		if (activeProvider === PROVIDER_ID && ctx.hasUI) refreshInBackground(ctx, lifecycleToken);
 	});
 
 	pi.on("session_shutdown", () => {
+		lifecycleToken++;
+		activeProvider = null;
 		cachedUsage = undefined;
 		usageError = undefined;
 	});
@@ -227,7 +235,7 @@ export default function (pi: ExtensionAPI): void {
 		description: "Show Command Code plan usage (5h/weekly windows, remaining credits)",
 		handler: async (_args, ctx) => {
 			try {
-				const apiKey = await resolveApiKey(ctx as unknown as ExtensionContext);
+				const apiKey = await resolveApiKey(ctx);
 				if (!apiKey) {
 					emitCommandOutput(ctx, "No Command Code API key. Run /login command-code first.", "warning");
 					return;
@@ -237,7 +245,7 @@ export default function (pi: ExtensionAPI): void {
 				cachedUsage = usage;
 				usageError = undefined;
 				emitCommandOutput(ctx, formatUsageSummary(usage));
-				updateWidget(ctx as unknown as ExtensionContext, true);
+				updateWidget(ctx);
 			} catch (error) {
 				usageError = errorMessage(error);
 				if (cachedUsage) {
@@ -249,6 +257,7 @@ export default function (pi: ExtensionAPI): void {
 				} else {
 					emitCommandOutput(ctx, `Command Code usage unavailable: ${usageError}`, "warning");
 				}
+				updateWidget(ctx);
 			}
 		},
 	});

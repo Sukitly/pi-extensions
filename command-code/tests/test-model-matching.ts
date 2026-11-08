@@ -12,6 +12,7 @@ import {
   matchCommandCodeModel,
   normalizeKey,
   parseCommandCodeModels,
+  refreshStoredModelMetadata,
   type BuiltinModelLike,
   type CommandCodeModelEntry,
   type CommandCodeApiResponse,
@@ -97,6 +98,40 @@ const claudeBuiltIn: BuiltinModelLike = {
 };
 
 const index = buildChatCatalogIndex([glmBuiltIn, mimoBuiltIn, museBuiltIn, claudeBuiltIn]);
+
+const minimaxAnthropic: BuiltinModelLike = {
+  ...claudeBuiltIn,
+  id: "MiniMax-M3.1-Flash",
+  name: "MiniMax M3.1 Flash",
+  compat: { forceAdaptiveThinking: true },
+  thinkingLevelMap: { low: "low", high: "high" },
+};
+const minimaxCompletions: BuiltinModelLike = {
+  ...minimaxAnthropic,
+  provider: "opencode-go",
+  api: "openai-completions",
+  compat: { supportsStrictMode: true },
+  thinkingLevelMap: { off: null, low: "low", medium: "medium", high: "high" },
+};
+const minimaxIndex = buildChatCatalogIndex([minimaxAnthropic, minimaxCompletions]);
+const minimaxEntry: CommandCodeModelEntry = {
+  id: "minimax/minimax-m3.1-flash",
+  name: "MiniMax M3.1 Flash",
+  supported_endpoints: ["/chat/completions"],
+};
+const minimaxMatch = matchCommandCodeModel(minimaxEntry, minimaxIndex)?.model;
+eq(minimaxMatch?.reasoning, true, "same ID prefers a matching protocol for thinking levels");
+eq(minimaxMatch?.thinkingLevelMap, minimaxCompletions.thinkingLevelMap, "MiniMax retains the matching thinking levels");
+eq(minimaxMatch?.compat, minimaxCompletions.compat, "Anthropic-only thinking flags are not copied to completions");
+const previouslyCached = { ...minimaxMatch!, reasoning: false, thinkingLevelMap: minimaxAnthropic.thinkingLevelMap, compat: minimaxAnthropic.compat };
+const repaired = refreshStoredModelMetadata([previouslyCached], minimaxIndex)[0];
+eq(repaired.reasoning, true, "previously cached non-reasoning model is repaired offline");
+eq(repaired.thinkingLevelMap, minimaxCompletions.thinkingLevelMap, "cached thinking map is repaired");
+eq(repaired.compat, minimaxCompletions.compat, "cached protocol flags are repaired");
+const mismatchedOnly = matchCommandCodeModel(minimaxEntry, buildChatCatalogIndex([minimaxAnthropic]))?.model;
+eq(mismatchedOnly?.reasoning, false, "no compatible protocol means thinking stays unavailable");
+eq(mismatchedOnly?.thinkingLevelMap, undefined, "incompatible thinking map is not leaked");
+eq(mismatchedOnly?.compat, undefined, "incompatible transport flags are not leaked");
 
 // ---------------------------------------------------------------------------
 // endpoint routing
