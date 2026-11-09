@@ -192,7 +192,7 @@ function windowPercent(used: number | undefined, cap: number | undefined): strin
 	return `${Math.max(0, Math.min(100, Math.round((used / cap) * 100)))}%`;
 }
 
-/** Full multi-line summary for /command-code.usage. Never invents a monthly cap. */
+/** Full multi-line usage summary. Never invents a monthly cap. */
 export function formatUsageSummary(
 	usage: CommandCodeUsage,
 	opts: { stale?: string; now?: number } = {},

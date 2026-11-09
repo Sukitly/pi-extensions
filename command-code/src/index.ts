@@ -6,14 +6,12 @@
 //  - dynamic model discovery from GET /provider/v1/models, reusing Pi's
 //    built-in model metadata and endpoint implementations
 //  - plan usage (5h / weekly windows + remaining monthly credits) shown as a
-//    persistent widget while a Command Code model is selected, and via
-//    /command-code.usage
+//    persistent widget while a Command Code model is selected
 import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
-	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { registerUsage } from "../../provider-shared/usage-lifecycle.ts";
 import {
 	anthropicMessagesApi,
 	createProvider,
@@ -36,15 +34,10 @@ import {
 	PROVIDER_ID,
 	PROVIDER_NAME,
 } from "./catalog.ts";
-import {
-	fetchCommandCodeUsage,
-	formatUsageSummary,
-	type CommandCodeUsage,
-} from "./usage.ts";
+import { fetchCommandCodeUsage } from "./usage.ts";
 import { buildCommandCodeWidgetLine } from "./widget.ts";
 
 export const WIDGET_ID = "command-code-usage";
-const MIN_USAGE_REFRESH_MS = 3 * 60 * 1000;
 
 function chatModels(models: readonly unknown[]): Model[] {
 	return models.filter(
@@ -141,125 +134,13 @@ export default function (pi: ExtensionAPI): void {
 		}
 	});
 
-	// ------------------------- usage widget -------------------------
-
-	let cachedUsage: CommandCodeUsage | undefined;
-	let usageError: string | undefined;
-	let refreshInFlight: Promise<void> | undefined;
-	let activeProvider: string | null = null;
-	let lifecycleToken = 0;
-
-	function resolveApiKey(ctx: ExtensionContext): Promise<string | undefined> {
-		return ctx.modelRegistry.getApiKeyForProvider(PROVIDER_ID);
-	}
-
-	async function refreshUsage(ctx: ExtensionContext, force = false): Promise<void> {
-		if (!force && !usageError && cachedUsage && Date.now() - cachedUsage.fetchedAt < MIN_USAGE_REFRESH_MS) return;
-		if (refreshInFlight) return refreshInFlight;
-		// Capture the registry before detaching; ctx may become stale after /reload.
-		const modelRegistry = ctx.modelRegistry;
-		const refresh = (async () => {
-			try {
-				const apiKey = await modelRegistry.getApiKeyForProvider(PROVIDER_ID);
-				if (!apiKey) throw new Error("No Command Code API key. Run /login command-code first.");
-				cachedUsage = await fetchCommandCodeUsage(apiKey);
-				usageError = undefined;
-			} catch (error) {
-				usageError = errorMessage(error);
-			}
-		})();
-		refreshInFlight = refresh;
-		try {
-			await refresh;
-		} finally {
-			if (refreshInFlight === refresh) refreshInFlight = undefined;
-		}
-	}
-
-	function updateWidget(ctx: ExtensionContext): void {
-		if (!ctx.hasUI) return;
-		try {
-			if (activeProvider !== PROVIDER_ID || (!cachedUsage && !usageError)) {
-				ctx.ui.setWidget(WIDGET_ID, undefined);
-				return;
-			}
-			ctx.ui.setWidget(
-				WIDGET_ID,
-				(_tui, theme) => new Text([
-					cachedUsage ? buildCommandCodeWidgetLine(cachedUsage, theme) : "",
-					usageError ? theme.fg("error", `command-code usage: refresh failed${cachedUsage ? " (stale data)" : ""} — ${usageError}`) : "",
-				].filter(Boolean).join("\n"), 0, 0),
-				{ placement: "belowEditor" },
-			);
-		} catch (error) {
-			if (!String(error).includes("ctx is stale")) console.error(`[command-code] widget: ${errorMessage(error)}`);
-		}
-	}
-
-	function refreshInBackground(ctx: ExtensionContext, token: number, force = false): void {
-		void refreshUsage(ctx, force)
-			.then(() => {
-				if (token === lifecycleToken && activeProvider === PROVIDER_ID) updateWidget(ctx);
-			})
-			.catch(() => {});
-	}
-
-	pi.on("session_start", (_event, ctx) => {
-		if (!ctx.hasUI) return;
-		activeProvider = ctx.model?.provider ?? null;
-		updateWidget(ctx);
-		if (activeProvider === PROVIDER_ID) refreshInBackground(ctx, lifecycleToken, true);
-	});
-
-	pi.on("model_select", (event, ctx) => {
-		activeProvider = event.model.provider;
-		lifecycleToken++;
-		updateWidget(ctx);
-		if (activeProvider === PROVIDER_ID && ctx.hasUI) refreshInBackground(ctx, lifecycleToken);
-	});
-
-	pi.on("agent_end", (_event, ctx) => {
-		if (activeProvider === PROVIDER_ID && ctx.hasUI) refreshInBackground(ctx, lifecycleToken);
-	});
-
-	pi.on("session_shutdown", () => {
-		lifecycleToken++;
-		activeProvider = null;
-		cachedUsage = undefined;
-		usageError = undefined;
-	});
-
-	// ------------------------- commands -------------------------
-
-	pi.registerCommand("command-code.usage", {
-		description: "Show Command Code plan usage (5h/weekly windows, remaining credits)",
-		handler: async (_args, ctx) => {
-			try {
-				const apiKey = await resolveApiKey(ctx);
-				if (!apiKey) {
-					emitCommandOutput(ctx, "No Command Code API key. Run /login command-code first.", "warning");
-					return;
-				}
-				if (ctx.hasUI) ctx.ui.notify("Fetching Command Code usage…", "info");
-				const usage = await fetchCommandCodeUsage(apiKey);
-				cachedUsage = usage;
-				usageError = undefined;
-				emitCommandOutput(ctx, formatUsageSummary(usage));
-				updateWidget(ctx);
-			} catch (error) {
-				usageError = errorMessage(error);
-				if (cachedUsage) {
-					emitCommandOutput(
-						ctx,
-						`${formatUsageSummary(cachedUsage, { stale: `refresh failed (${usageError}); data may be expired` })}`,
-						"warning",
-					);
-				} else {
-					emitCommandOutput(ctx, `Command Code usage unavailable: ${usageError}`, "warning");
-				}
-				updateWidget(ctx);
-			}
-		},
+	registerUsage(pi, {
+		provider: PROVIDER_ID,
+		widgetId: WIDGET_ID,
+		missingCredential: "No Command Code API key. Run /login command-code first.",
+		resolveKey: (ctx) => ctx.modelRegistry.getApiKeyForProvider(PROVIDER_ID),
+		fetchUsage: fetchCommandCodeUsage,
+		widgetLine: buildCommandCodeWidgetLine,
 	});
 
 	pi.registerCommand("command-code.models", {
