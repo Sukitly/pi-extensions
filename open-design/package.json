@@ -1,0 +1,13 @@
+{
+  "name": "pi-open-design",
+  "version": "0.2.0",
+  "description": "OpenDesign Cloud provider for Pi",
+  "license": "MIT",
+  "type": "module",
+  "pi": { "extensions": ["./src/index.ts"] },
+  "scripts": { "test": "node scripts/run-ts.mjs tests/provider.ts && node scripts/run-ts.mjs tests/account-usage.ts" },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": ">=0.80.0",
+    "@earendil-works/pi-coding-agent": ">=0.80.0"
+  }
+}

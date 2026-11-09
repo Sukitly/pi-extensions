@@ -1,5 +1,5 @@
 // Exercise the Command Code widget with Pi's component-factory setWidget contract.
-import { match, ok, strictEqual, doesNotMatch } from "node:assert/strict";
+import { match, strictEqual, doesNotMatch } from "node:assert/strict";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import commandCode, { WIDGET_ID } from "../src/index.ts";
 import { parseCredits } from "../src/usage.ts";
@@ -7,7 +7,6 @@ import { buildCommandCodeWidgetLine } from "../src/widget.ts";
 
 const theme = { fg: (_color: string, text: string) => text } as Theme;
 const handlers = new Map<string, Array<(event: any, ctx: ExtensionContext) => void>>();
-let usageCommand: ((args: string, ctx: ExtensionCommandContext) => Promise<void>) | undefined;
 let widget = "";
 let placement = "";
 let widgetId = "";
@@ -18,12 +17,9 @@ commandCode({
     handlers.set(name, [...(handlers.get(name) ?? []), handler]);
     return () => {};
   },
-  registerCommand: (name: string, command: { handler: typeof usageCommand }) => {
-    if (name === "command-code.usage") usageCommand = command.handler;
-  },
+  registerCommand: () => {},
 } as unknown as ExtensionAPI);
 
-ok(usageCommand, "usage command registered");
 const ctx = {
   hasUI: true,
   model: { provider: "command-code" },
@@ -62,23 +58,8 @@ try {
   match(widget, /Monthly: 42 credits left/);
   doesNotMatch(widget, /unknown|resets in/);
 
-  globalThis.fetch = async () => new Response("unavailable", { status: 503 });
-  await usageCommand("", ctx);
-  match(widget, /20%.*8%.*42 credits left/);
-  match(widget, /refresh failed \(stale data\).*503/);
-
   emit("model_select", { model: { provider: "other" } });
   strictEqual(widget, "", "switching provider hides the widget");
-
-  let finishRefresh: ((response: Response) => void) | undefined;
-  globalThis.fetch = () => new Promise<Response>(resolve => { finishRefresh = resolve; });
-  emit("model_select", { model: { provider: "command-code" } });
-  await new Promise(resolve => setImmediate(resolve));
-  ok(finishRefresh, "switching back retries after the failure");
-  emit("model_select", { model: { provider: "other" } });
-  finishRefresh(Response.json({ credits: { monthlyCredits: 99 } }));
-  await new Promise(resolve => setImmediate(resolve));
-  strictEqual(widget, "", "a late refresh cannot redraw the old provider's widget");
 
   const monthlyOnly = buildCommandCodeWidgetLine(parseCredits({ credits: { monthlyCredits: 70 } }), theme);
   strictEqual(monthlyOnly, "Monthly: 70 credits left", "missing windows do not fabricate zero-percent bars");

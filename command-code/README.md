@@ -1,6 +1,6 @@
 # pi-command-code
 
-A self-contained Pi extension that adds **Command Code** (`https://api.commandcode.ai`)
+A Pi extension that adds **Command Code** (`https://api.commandcode.ai`)
 as a native provider — no `models.json` edits, no changes to your `usage-widget.ts`.
 
 ## What it does
@@ -21,7 +21,7 @@ as a native provider — no `models.json` edits, no changes to your `usage-widge
      - `/responses` → Pi's `openai-responses` implementation
    - **Cost is zeroed on every model.** Command Code bills a plan-wide **credit pool** on the
      server, not vendor per-token USD prices, so copying e.g. Anthropic's prices would show
-     fictitious spend. Real consumption is shown via `/command-code.usage` instead.
+     fictitious spend. Real consumption is shown in the usage widget instead.
    - Discovery failures (endpoint down, offline, no key) never clear registered models: the
      last-known-good catalog is restored from Pi's models store, and a fallback directory
      (GLM-5.3 Flash, MiMo-V2.6 Flash, Muse Spark 1.3, Claude Sonnet 4.6) covers first runs.
@@ -34,8 +34,6 @@ as a native provider — no `models.json` edits, no changes to your `usage-widge
 3. **Usage** — `GET https://api.commandcode.ai/alpha/billing/credits` (undocumented alpha
    endpoint, community-verified shape from
    [CommandCode-Usagebar](https://github.com/berkeduruu/CommandCode-Usagebar)):
-   - `/command-code.usage` prints 5-hour and weekly windows (credits used, cap, reset
-     countdown) and remaining monthly credits.
    - While a Command Code model is selected, a below-editor widget uses the same
      10-column bars, reset times, and weekly pace indicator as `usage-widget.ts`
      (refreshed on session start and around `agent_end`, min 3 min apart).
@@ -43,6 +41,11 @@ as a native provider — no `models.json` edits, no changes to your `usage-widge
      hard-coded (the community extension's GOAT = 70 is deliberately not reproduced);
      remaining credits are shown without a percentage. Failed refreshes show an error and a
      stale-data marker instead of blocking Pi.
+
+Catalog matching, usage rendering and the refresh lifecycle are shared with
+OpenDesign through the sibling `../provider-shared/` directory. Keep that
+shared directory when moving/installing this extension; provider-specific
+endpoints, credential resolution and response parsing remain here.
 
 ## Install / run
 
@@ -52,7 +55,6 @@ so it loads on the next `pi` start (or `/reload` in an active session).
 ```
 /login command-code   # paste the Command Code API key
 /model                # pick e.g. GLM-5.3 Flash, MiMo V2.6 Flash or Claude
-/command-code.usage   # plan usage
 /command-code.models  # list models; `/command-code.models refresh` forces discovery
 ```
 
@@ -70,7 +72,7 @@ so it loads on the next `pi` start (or `/reload` in an active session).
 
 Not yet performed (no API key in this environment). Once logged in:
 
-1. `/command-code.usage` — confirm 5h/weekly/credits fields match the Command Code console.
+1. Select a Command Code model and confirm the usage widget matches the console.
 2. Streaming text via a GLM-5.3 Flash or Claude model.
 3. Tool calls (e.g. ask it to read a file) via both protocol families.
 4. `/logout command-code` cleans the credential; `/login` re-prompts.
