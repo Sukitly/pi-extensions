@@ -7,7 +7,6 @@ A small collection of extensions for [pi-coding-agent](https://github.com/badlog
 | File | What it does | How to use | Requirements |
 |---|---|---|---|
 | `bash-timeout.ts` | Enforces a 60-second default and 300-second maximum for agent Bash calls | Auto-runs for agent Bash tool calls | None |
-| `auth-backup.ts` | Manages backups of `~/.pi/agent/auth.json` through a single interactive command | Run `/auth-backup` | Interactive UI |
 | `branch-pr-widget.ts` | Shows the GitHub PR for the current branch | Auto-runs on session start and after agent turns | `gh` installed, current repo branch associated with a PR |
 | `continue.ts` | Sends literal `continue` or `approve` user messages after the agent stops | Press `Ctrl+J` for `continue` or `Ctrl+R` for `approve` while Pi is idle | Free those keys from their built-in actions in `keybindings.json` |
 | `docs-changes.ts` | Shows changed files under `agent-docs/` (fallback: `docs/`) as a widget | Auto-runs on session start and after agent turns | Git repo with an `agent-docs/` or `docs/` directory |
@@ -26,7 +25,6 @@ Copy any extension file into your pi extensions directory:
 
 ```bash
 cp bash-timeout.ts ~/.pi/agent/extensions/
-cp auth-backup.ts ~/.pi/agent/extensions/
 cp branch-pr-widget.ts ~/.pi/agent/extensions/
 cp continue.ts ~/.pi/agent/extensions/
 cp docs-changes.ts ~/.pi/agent/extensions/
@@ -53,7 +51,7 @@ Then reload pi:
 You can also load a file directly for testing:
 
 ```bash
-pi -e ./auth-backup.ts
+pi -e ./bash-timeout.ts
 ```
 
 ## Extensions
@@ -82,40 +80,6 @@ Run its tests with:
 ```bash
 node --test tests/bash-timeout.test.mjs
 ```
-
-### `auth-backup.ts`
-
-Interactive auth backup manager for `~/.pi/agent/auth.json`.
-
-Behavior:
-
-- Stores backups under `~/.pi/agent/auth-backups/`
-- Uses one command: `/auth-backup`
-- Shows an interactive list with:
-  - `+ New auth backup`
-  - existing backups with creation time and provider summary
-- For an existing backup, opens an action menu:
-  - `Backup current auth here`
-  - `Restore this backup`
-  - `Delete this backup`
-
-Restore overwrites the full `~/.pi/agent/auth.json` and reloads pi.
-
-Use it when:
-
-- you switch between multiple auth setups
-- you want to save the current login state before replacing it
-- you want to restore a previous full auth state quickly
-
-#### Screenshots
-
-Backup list:
-
-![auth-backup list screenshot](assets/auth-backup-list.png)
-
-Action menu:
-
-![auth-backup actions screenshot](assets/auth-backup-actions.png)
 
 ### `branch-pr-widget.ts`
 
@@ -480,7 +444,6 @@ Use it when:
 
 | Extension | Notes |
 |---|---|
-| `auth-backup.ts` | Requires interactive UI. Restore replaces the full auth file, not a single provider entry. |
 | `branch-pr-widget.ts` | Hidden when no PR is associated with the current branch or `gh` is unavailable. |
 | `docs-changes.ts` | Hidden when neither `agent-docs/` nor `docs/` exists, or the selected directory has no matching changes. |
 | `export-dialogue.ts` | `/xp` makes a separate title-generation request with the active model. The request is not persisted in the exported session. |
