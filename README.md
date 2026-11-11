@@ -13,11 +13,9 @@ A small collection of extensions for [pi-coding-agent](https://github.com/badlog
 | `export-dialogue.ts` | Exports the current branch to a dated, LLM-titled JSONL file | Run `/xp` | Active model credentials; optional `PI_XP_PATH` |
 | `git-diff-stats.ts` | Appends whole-branch `+added -deleted` line counts, plus an uncommitted marker, after the branch name on the footer's cwd line | Auto-runs on session start, after agent turns, and after mutating tools | Git repo; TUI mode |
 | `disable-find.ts` | Blocks agent Bash invocations of `find` and directs the agent to use `fd` or `rg` | Auto-runs for agent Bash tool calls | `fd` and `rg` in Pi's managed tool path |
-| `replace-pi-with-claude-code.ts` | Rewrites `pi` to `claude code` in the system prompt | Auto-runs before each agent start and before each provider request | None |
 | `read-url.ts` | Adds a `read_url` tool that reads public URLs as Markdown through Jina Reader | Agent calls `read_url` when it needs external docs | Optional `JINA_API_KEY` for authenticated Jina quota |
-| `usage-widget.ts` | Shows Anthropic/legacy Codex usage bars or an OpenAI subscription quota-unavailable notice | Auto-runs on session start, model change, and after agent turns | Anthropic OAuth, legacy OpenAI Codex auth, or OpenAI subscription OAuth |
+| `usage-widget.ts` | Shows legacy Codex, Antigravity, and OpenCode Go usage bars or an OpenAI subscription quota-unavailable notice | Auto-runs on session start, model change, and after agent turns | Legacy OpenAI Codex auth, Antigravity, OpenCode Go, or OpenAI subscription OAuth |
 | `tps.ts` | Reports output tokens per second and token usage after each agent run | Auto-runs after agent turns | Interactive UI |
-| `fix-anthropic-thinking-block-drop.ts` | Reinjects signed thinking blocks that pi-ai drops, avoiding Anthropic `400` errors on Opus/Sonnet 4.8 | Auto-runs before each Anthropic provider request | Anthropic model with thinking enabled |
 
 ## Installation
 
@@ -35,11 +33,9 @@ mkdir -p ~/.pi/agent/extensions/blocked-commands/find
 cp blocked-commands/find/find ~/.pi/agent/extensions/blocked-commands/find/
 cp blocked-commands/find/message.txt ~/.pi/agent/extensions/blocked-commands/find/
 chmod +x ~/.pi/agent/extensions/blocked-commands/find/find
-cp replace-pi-with-claude-code.ts ~/.pi/agent/extensions/
 cp read-url.ts ~/.pi/agent/extensions/
 cp usage-widget.ts ~/.pi/agent/extensions/
 cp tps.ts ~/.pi/agent/extensions/
-cp fix-anthropic-thinking-block-drop.ts ~/.pi/agent/extensions/
 ```
 
 Then reload pi:
@@ -278,23 +274,6 @@ Run its tests with:
 node --test tests/disable-find.test.mjs
 ```
 
-### `replace-pi-with-claude-code.ts`
-
-Rewrites occurrences of `pi` in the system prompt to `claude code` before each run.
-
-Behavior:
-
-- Hooks `before_agent_start` for turns started by typed input or `sendUserMessage`
-- Hooks `before_provider_request` and rewrites the serialized `system` blocks, covering turns triggered by extension custom messages (`pi.sendMessage` with `triggerTurn`), which never fire `before_agent_start`
-- Replaces ` pi` case-insensitively with ` claude code`
-- Preserves `cache_control` and other block fields; leaves message content and non-Anthropic payload shapes untouched
-- Idempotent: an already-rewritten prompt passes through unchanged
-
-Use it when:
-
-- you want the agent framed as Claude Code instead of pi
-- you use Anthropic subscription OAuth, whose billing classifier rejects requests that do not look like Claude Code with 400 "You're out of extra usage" even when quota remains
-
 ### `read-url.ts`
 
 Adds a `read_url` tool for reading public HTTPS URLs as LLM-friendly Markdown using [Jina Reader](https://jina.ai/reader/).
@@ -376,8 +355,8 @@ Shows usage information or an availability notice for the active provider.
 
 Handled providers:
 
-- `anthropic`: subscription usage bars
 - `openai-codex`: legacy Codex subscription usage bars
+- `antigravity`: Gemini or Claude/GPT group usage bars, following the selected model
 - `opencode-go`: OpenCode Go 5h / 7d / 30d usage bars
 - `openai`: ChatGPT subscription OAuth shows a quota-unavailable notice and `https://chatgpt.com/settings/usage`; API-key authentication keeps the widget hidden
 
@@ -385,7 +364,7 @@ Behavior:
 
 - Displays usage bars for primary and secondary windows when quota data is available
 - Shows reset times
-- Computes a 7-day pace delta for Anthropic-style usage windows
+- Computes a 7-day pace delta for windows of one day or longer
 - Caches usage briefly to avoid excessive requests
 - Refreshes on:
   - `session_start`
@@ -395,7 +374,6 @@ Behavior:
 
 Data sources:
 
-- Anthropic: `https://api.anthropic.com/api/oauth/usage`
 - Legacy Codex: `https://chatgpt.com/backend-api/wham/usage`
 - OpenCode Go: `https://opencode.ai/console/api/go/status`, the same endpoint the console UI reads
 - Native OpenAI subscription: no supported quota API; the widget makes no usage requests and does not resolve or refresh access tokens
@@ -404,10 +382,12 @@ Pi added native OpenAI subscription sign-in in v0.99.0. Its direct OAuth tokens 
 
 OpenCode Go meters are micro-cent integers, so percentages are computed as `usedMicroCents / limitMicroCents`. The older `https://opencode.ai/zen/go/v1/usage` endpoint returns the same ratios truncated to whole percentages (0.91% becomes `0`), which disagrees with the console, so the widget queries the status endpoint instead.
 
+Anthropic usage moved to the [pi-claude](https://github.com/Sukitly/pi-claude) package, which also owns every other Anthropic-specific behavior.
+
 Use it when:
 
 - you want quota visibility while working
-- you switch between Anthropic and Codex models
+- you switch between subscription providers
 
 #### Screenshot
 
@@ -416,29 +396,6 @@ Use it when:
 ### `tps.ts`
 
 Notifies the interactive UI after an agent run with output tokens per second, input and output tokens, total tokens, cache-hit percentage, and elapsed time. Cache hit is cache-read tokens divided by all prompt tokens (uncached input + cache reads + cache writes), rounded to a whole percentage unless a partial hit would round to 100%; runs with no prompt tokens omit the percentage. The rate divides output tokens by the entire agent run duration, including tool execution and other delays; it is not the model's pure generation speed. Runs with no output tokens produce no notification.
-
-### `fix-anthropic-thinking-block-drop.ts`
-
-Workaround for an Anthropic `400` error seen on Opus/Sonnet 4.8:
-
-> `thinking or redacted_thinking blocks in the latest assistant message cannot be modified`
-
-The root cause is in pi-ai: when building the Anthropic payload it drops any thinking block whose visible text is empty, even when the block is signed. With adaptive (`summarized`) thinking the model often emits signed thinking blocks with an empty summary, and Opus/Sonnet 4.8 rejects the replay when one is missing.
-
-Behavior:
-
-- Hooks `before_provider_request` and only acts on the `anthropic-messages` API
-- Aligns each assistant message in the outgoing payload with the original session message from the tail
-- Reinjects any signed, empty-text thinking block that pi-ai dropped, at its correct position
-- Repairs same-model turns only; cross-model thinking drops are intentional and left untouched
-- Bails out without modifying the payload if its model of pi-ai's transform diverges from the actual payload
-- Sets a status line reporting how many blocks were reinjected
-
-Use it when:
-
-- you run Anthropic Opus/Sonnet 4.8 with adaptive (`summarized`) thinking
-- you hit `thinking ... blocks in the latest assistant message cannot be modified` 400 errors
-- you want a stopgap until upstream pi-ai keeps signed thinking blocks regardless of text emptiness
 
 ## Notes
 
@@ -449,11 +406,9 @@ Use it when:
 | `export-dialogue.ts` | `/xp` makes a separate title-generation request with the active model. The request is not persisted in the exported session. |
 | `git-diff-stats.ts` | Replaces the footer, so it conflicts with any other `setFooter` extension (last one to run wins). It reuses the built-in `FooterComponent`, but cannot read the auto-compaction flag, so the stats line always shows `(auto)`. The base branch is resolved from local refs only; after a long gap without fetching, a branch rebased onto newer upstream commits can report a stale merge base. Shows nothing outside a git repo or when the branch has no net change. |
 | `disable-find.ts` | Applies only to agent Bash tool calls. User-initiated `!` and `!!` Bash commands in Pi remain unrestricted. The extension fails to load if its dedicated shim or shared message file is missing. |
-| `replace-pi-with-claude-code.ts` | Only affects system prompt text (agent state and serialized provider payload), not UI labels, command names, or message content. |
 | `read-url.ts` | Reads public URLs through Jina Reader. Set `JINA_API_KEY` only if you want authenticated fallback after anonymous quota is exhausted. |
-| `usage-widget.ts` | Hidden for unsupported providers and OpenAI API keys. Native OpenAI subscription OAuth shows a quota-unavailable notice; Anthropic/legacy Codex refresh failures show sanitized errors, retaining stale data when available. |
+| `usage-widget.ts` | Hidden for unsupported providers and OpenAI API keys. Native OpenAI subscription OAuth shows a quota-unavailable notice; refresh failures show sanitized errors, retaining stale data when available. |
 | `tps.ts` | Requires an interactive UI and a completed agent run with output tokens. The reported rate includes tool execution time; cache-hit percentage is omitted when there are no prompt tokens. |
-| `fix-anthropic-thinking-block-drop.ts` | Workaround for a pi-ai thinking-block drop bug. Acts only on the `anthropic-messages` API and same-model turns. Remove once pi-ai keeps signed empty-text thinking blocks. |
 
 ## License
 

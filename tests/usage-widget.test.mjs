@@ -8,7 +8,7 @@ const source = stripTypeScriptTypes(readFileSync(new URL("../usage-widget.ts", i
 	.replace(/^import .*;$/gm, "")
 	.replace("export default function", "return function");
 const codexKey = `header.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "account" } }))}.signature`;
-function harness({ provider = "anthropic", key = "sk-test-secret", fetch, credentials, oauth = false, hasUI = true } = {}) {
+function harness({ provider = "opencode-go", key = "sk-test-secret", fetch, credentials, oauth = false, hasUI = true } = {}) {
 	const handlers = new Map();
 	let widget = "";
 	const extension = new Function("Text", "fetch", source)(class { constructor(text) { this.text = text; } }, fetch);
@@ -31,7 +31,7 @@ function harness({ provider = "anthropic", key = "sk-test-secret", fetch, creden
 		},
 	};
 }
-const success = () => Response.json({ five_hour: { utilization: 25, resets_at: null } });
+const success = () => Response.json({ access: { meters: { fiveHour: { limitMicroCents: "100", usedMicroCents: "25", resetsAt: null } } } });
 
 test("native OpenAI subscription shows an unavailable notice without resolving or sending credentials", async () => {
 	let requests = 0;
@@ -106,7 +106,7 @@ test("OpenAI notices follow OAuth login and logout without caching the auth mode
 	assert.match(h.text, /quota query unavailable/);
 });
 
-test("late Anthropic refresh cannot replace an OpenAI subscription notice", async () => {
+test("late usage refresh cannot replace an OpenAI subscription notice", async () => {
 	let resolve;
 	const h = harness({ oauth: true, fetch: () => new Promise(r => { resolve = r; }) });
 	await h.emit();
@@ -120,7 +120,7 @@ test("late Anthropic refresh cannot replace an OpenAI subscription notice", asyn
 test("shows HTTP status and API message, redacts credentials and bounds terminal text", async () => {
 	const h = harness({ fetch: async () => Response.json({ error: { message: `denied sk-test-secret Bearer another-secret\n\u001b[31m${"x".repeat(500)}` } }, { status: 401, statusText: "Unauthorized" }) });
 	await h.emit();
-	assert.match(h.text, /anthropic usage: refresh failed.*HTTP 401 Unauthorized: denied/);
+	assert.match(h.text, /opencode-go usage: refresh failed.*HTTP 401 Unauthorized: denied/);
 	assert.match(h.text, /\[redacted\]/);
 	assert.doesNotMatch(h.text, /sk-test-secret|another-secret|[\n\u001b]/);
 	assert.ok(h.text.length < 400);
