@@ -14,17 +14,6 @@ interface UsageResponse {
 	groups?: Record<string, UsageWindow[]>;
 }
 
-interface AnthropicUsageBucket {
-	utilization: number;
-	resets_at: string | null;
-}
-
-interface AnthropicUsageResponse {
-	five_hour: AnthropicUsageBucket | null;
-	seven_day: AnthropicUsageBucket | null;
-	seven_day_opus: AnthropicUsageBucket | null;
-}
-
 interface CodexWindow {
 	used_percent: number;
 	reset_at: number;
@@ -174,27 +163,6 @@ function extractCodexAccountId(token: string): string | null {
 	if (!auth || typeof auth !== "object") return null;
 	const accountId = (auth as { chatgpt_account_id?: unknown }).chatgpt_account_id;
 	return typeof accountId === "string" && accountId.length > 0 ? accountId : null;
-}
-
-function normalizeAnthropicUsage(data: AnthropicUsageResponse): UsageResponse {
-	const windows: UsageWindow[] = [];
-	if (data.five_hour) {
-		windows.push({
-			label: "5h",
-			utilization: data.five_hour.utilization,
-			resetsAt: data.five_hour.resets_at,
-			windowSeconds: FIVE_HOURS_SECONDS,
-		});
-	}
-	if (data.seven_day) {
-		windows.push({
-			label: "7d",
-			utilization: data.seven_day.utilization,
-			resetsAt: data.seven_day.resets_at,
-			windowSeconds: SEVEN_DAYS_SECONDS,
-		});
-	}
-	return { windows };
 }
 
 function normalizeCodexWindow(
@@ -400,20 +368,6 @@ async function requireUsageResponse(response: Response): Promise<unknown> {
 	}
 }
 
-async function fetchAnthropicUsage(apiKey: string): Promise<UsageResponse> {
-	const response = await fetch("https://api.anthropic.com/api/oauth/usage", {
-		method: "GET",
-		headers: {
-			Accept: "application/json",
-			"Content-Type": "application/json",
-			Authorization: `Bearer ${apiKey}`,
-			"anthropic-beta": "oauth-2025-04-20",
-		},
-		signal: AbortSignal.timeout(10000),
-	});
-	return normalizeAnthropicUsage((await requireUsageResponse(response)) as AnthropicUsageResponse);
-}
-
 async function fetchCodexUsage(apiKey: string): Promise<UsageResponse> {
 	const accountId = extractCodexAccountId(apiKey);
 	if (!accountId) throw new Error("Missing ChatGPT account ID in Codex credentials; please log in again");
@@ -487,7 +441,6 @@ async function fetchOpenCodeGoUsage(apiKey: string): Promise<UsageResponse> {
 }
 
 async function fetchUsage(provider: string, apiKey: string): Promise<UsageResponse | null> {
-	if (provider === "anthropic") return fetchAnthropicUsage(apiKey);
 	if (provider === "openai-codex") return fetchCodexUsage(apiKey);
 	if (provider === "antigravity") return fetchAntigravityUsage(apiKey);
 	if (provider === "opencode-go") return fetchOpenCodeGoUsage(apiKey);
@@ -496,9 +449,8 @@ async function fetchUsage(provider: string, apiKey: string): Promise<UsageRespon
 
 function supportsUsageWidget(
 	provider: string | null | undefined,
-): provider is "anthropic" | "openai-codex" | "antigravity" | "opencode-go" {
+): provider is "openai-codex" | "antigravity" | "opencode-go" {
 	return (
-		provider === "anthropic" ||
 		provider === "openai-codex" ||
 		provider === "antigravity" ||
 		provider === "opencode-go"
