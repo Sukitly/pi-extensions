@@ -8,8 +8,47 @@ const source = stripTypeScriptTypes(readFileSync(new URL("../message-timestamps.
 	.replace(/^export default function/gm, "function default_1")
 	.replace(/^export function /gm, "function ");
 
-const moduleFactory = new Function(`${source}\nreturn { default: default_1, formatTimestampText, formatTimestampBadge };`);
-const { default: extension, formatTimestampText, formatTimestampBadge } = moduleFactory();
+const mockVisibleWidth = (str) => str.replace(/\x1b\[[0-9;]*m/g, "").length;
+const mockTruncateToWidth = (str, width) => {
+	let len = 0;
+	let out = "";
+	for (const ch of str) {
+		len++;
+		if (len > width) break;
+		out += ch;
+	}
+	return out;
+};
+
+class MockText {
+	constructor(text) {
+		this.text = text;
+	}
+	render(width) {
+		const lines = [];
+		for (const raw of this.text.split("\n")) {
+			let current = raw;
+			while (current.length > width) {
+				lines.push(current.slice(0, width));
+				current = current.slice(width);
+			}
+			lines.push(current);
+		}
+		return lines;
+	}
+}
+
+const moduleFactory = new Function(
+	"Text",
+	"visibleWidth",
+	"truncateToWidth",
+	`${source}\nreturn { default: default_1, formatTimestampText, formatTimestampBadge };`,
+);
+const { default: extension, formatTimestampText, formatTimestampBadge } = moduleFactory(
+	MockText,
+	mockVisibleWidth,
+	mockTruncateToWidth,
+);
 
 test("formatTimestampText formats time correctly for today, same year, and across years", () => {
 	const ref = new Date(2026, 4, 20, 12, 0, 0);
@@ -135,4 +174,34 @@ test("tool renderer keeps timestamp on the same line as Took or status text", as
 	assert.equal(completedLines.length, 2);
 	assert.equal(completedLines[0], "");
 	assert.match(completedLines[1], /^Took 0\.1s  \x1b\[2m\d{2}:\d{2}:\d{2}\x1b\[22m$/);
+});
+
+test("tool renderer wraps fallback long lines and ensures rendered lines never exceed terminal width", async () => {
+	let toolRendererResolver;
+
+	const piMock = {
+		on: () => {},
+		registerMarkdownTransformer: () => {},
+		registerToolRenderer: (resolver) => {
+			toolRendererResolver = resolver;
+		},
+	};
+
+	extension(piMock);
+
+	const resolved = toolRendererResolver("google_search", () => undefined);
+
+	const longLine = "A".repeat(300);
+	const completedComponent = resolved.renderResult(
+		{ content: [{ type: "text", text: longLine }] },
+		{ isPartial: false, expanded: false },
+		undefined,
+		{ toolCallId: "call_search_1" },
+	);
+
+	const width = 117;
+	const lines = completedComponent.render(width);
+	for (const line of lines) {
+		assert.ok(mockVisibleWidth(line) <= width, `Line length ${mockVisibleWidth(line)} exceeds terminal width ${width}`);
+	}
 });
