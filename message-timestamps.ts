@@ -7,7 +7,7 @@ import type {
 	ToolRenderResultOptions,
 	ToolRenderers,
 } from "@earendil-works/pi-coding-agent";
-import { type Component } from "@earendil-works/pi-tui";
+import { type Component, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 interface ToolCompletionRecord {
 	completedAt: Date;
@@ -109,12 +109,12 @@ class TimestampedResultComponent implements Component {
 		const rawLines = this.baseComponent
 			? this.baseComponent.render(width)
 			: this.fallbackText
-				? this.fallbackText.split("\n")
+				? new Text(this.fallbackText, 0, 0).render(width)
 				: [];
 
 		const hasText = rawLines.some((line) => line.trim().length > 0);
 		if (!hasText) {
-			return [this.timeBadge];
+			return [truncateToWidth(this.timeBadge, width)];
 		}
 
 		let targetIndex = -1;
@@ -129,13 +129,21 @@ class TimestampedResultComponent implements Component {
 		}
 
 		if (targetIndex === -1) {
-			return [this.timeBadge];
+			return [truncateToWidth(this.timeBadge, width)];
 		}
 
 		const result = [...rawLines];
 		const targetLine = result[targetIndex].trimEnd();
-		result[targetIndex] = `${targetLine}  ${this.timeBadge}`;
-		return result;
+		const badgeLen = visibleWidth(this.timeBadge);
+		const targetLen = visibleWidth(targetLine);
+
+		if (targetLen + 2 + badgeLen <= width) {
+			result[targetIndex] = `${targetLine}  ${this.timeBadge}`;
+		} else {
+			result.splice(targetIndex + 1, 0, this.timeBadge);
+		}
+
+		return result.map((line) => truncateToWidth(line, width));
 	}
 
 	handleInput?(data: string): void {
