@@ -386,41 +386,6 @@ async function fetchCodexUsage(apiKey: string): Promise<UsageResponse> {
 	return normalizeCodexUsage((await requireUsageResponse(response)) as CodexUsageResponse);
 }
 
-const ANTIGRAVITY_ENDPOINT_FALLBACKS = [
-	"https://daily-cloudcode-pa.googleapis.com",
-	"https://cloudcode-pa.googleapis.com",
-];
-
-async function fetchAntigravityUsage(apiKey: string): Promise<UsageResponse> {
-	const token = extractAntigravityToken(apiKey);
-	if (!token) throw new Error("Missing Antigravity access token; please log in again");
-
-	let lastError: unknown;
-	for (const endpoint of ANTIGRAVITY_ENDPOINT_FALLBACKS) {
-		try {
-			const response = await fetch(`${endpoint}/v1internal:retrieveUserQuotaSummary`, {
-				method: "POST",
-				headers: {
-					Accept: "application/json",
-					"Content-Type": "application/json",
-					Authorization: `Bearer ${token}`,
-					"User-Agent": "antigravity/cli/1.2.4 (aidev_client; os_type=linux; arch=amd64; cl=982146307; auth_method=consumer)",
-				},
-				body: "{}",
-				signal: AbortSignal.timeout(10000),
-			});
-			const data = (await requireUsageResponse(response)) as AntigravityQuotaResponse;
-			return normalizeAntigravityUsage(data);
-		} catch (error) {
-			lastError = error;
-			if (error instanceof Error && error.message.includes("403")) {
-				throw error;
-			}
-		}
-	}
-	throw lastError instanceof Error ? lastError : new Error(String(lastError));
-}
-
 // The console status endpoint is what https://opencode.ai/console reads, so its meters match the
 // web UI exactly. The zen/inference `/go/v1/usage` variants truncate the same ratios to whole
 // percentages (0.91% becomes 0), which disagrees with the console.
@@ -442,19 +407,14 @@ async function fetchOpenCodeGoUsage(apiKey: string): Promise<UsageResponse> {
 
 async function fetchUsage(provider: string, apiKey: string): Promise<UsageResponse | null> {
 	if (provider === "openai-codex") return fetchCodexUsage(apiKey);
-	if (provider === "antigravity") return fetchAntigravityUsage(apiKey);
 	if (provider === "opencode-go") return fetchOpenCodeGoUsage(apiKey);
 	return null;
 }
 
 function supportsUsageWidget(
 	provider: string | null | undefined,
-): provider is "openai-codex" | "antigravity" | "opencode-go" {
-	return (
-		provider === "openai-codex" ||
-		provider === "antigravity" ||
-		provider === "opencode-go"
-	);
+): provider is "openai-codex" | "opencode-go" {
+	return provider === "openai-codex" || provider === "opencode-go";
 }
 
 const WIDGET_ID = "provider-usage";
