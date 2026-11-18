@@ -314,6 +314,10 @@ ok(fallback.some((m) => m.id === "Qwen/Qwen3.6-Plus"), "Qwen 3.6 Plus in fallbac
 ok(fallback.some((m) => m.id === "xai/grok-4.5"), "Grok 4.5 in fallback");
 ok(fallback.some((m) => m.id === "xai/grok-4.6"), "Grok 4.6 in fallback");
 ok(fallback.some((m) => m.id === "xai/grok-4.7"), "Grok 4.7 in fallback");
+ok(fallback.some((m) => m.id === "moonshotai/Kimi-K3.1-Pro"), "Kimi K3.1 Pro in fallback");
+ok(fallback.some((m) => m.id === "moonshotai/Kimi-K3"), "Kimi K3 in fallback");
+ok(fallback.some((m) => m.id === "moonshotai/Kimi-K2.7-Code"), "Kimi K2.7 Code in fallback");
+ok(fallback.some((m) => m.id === "moonshotai/Kimi-K2.5"), "Kimi K2.5 in fallback");
 ok(fallback.every((m) => m.provider === PROVIDER_ID), "fallback models owned by command-code");
 ok(fallback.every((m) => m.cost.input === 0 && m.cost.output === 0), "fallback costs zeroed");
 

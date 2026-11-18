@@ -83,7 +83,7 @@ export function refreshStoredModelMetadata(models: readonly Model<Api>[], index:
 
 /**
  * Fallback directory used when discovery fails or Pi starts offline: core
- * baseline models plus the Qwen and Grok families stay available.
+ * baseline models plus the Qwen, Grok, and Kimi families stay available.
  * Entries are adapted the same way as live entries, resolved against the
  * built-in index.
  */
@@ -109,6 +109,13 @@ export const FALLBACK_ENTRIES: CommandCodeModelEntry[] = [
 	{ id: "xai/grok-4.5", name: "Grok 4.5", context_length: 500000, supported_endpoints: ["/chat/completions", "/responses"] },
 	{ id: "xai/grok-4.6", name: "Grok 4.6", context_length: 500000, supported_endpoints: ["/chat/completions", "/responses"] },
 	{ id: "xai/grok-4.7", name: "Grok 4.7", context_length: 500000, supported_endpoints: ["/chat/completions", "/responses"] },
+	// Kimi family
+	{ id: "moonshotai/Kimi-K3.1-Pro", name: "Kimi K3.1 Pro", context_length: 1048576, supported_endpoints: ["/chat/completions", "/responses"] },
+	{ id: "moonshotai/Kimi-K3", name: "Kimi K3", context_length: 1000000, supported_endpoints: ["/chat/completions", "/responses"] },
+	{ id: "moonshotai/Kimi-K2.7-Code", name: "Kimi K2.7 Code", context_length: 256000, supported_endpoints: ["/chat/completions", "/responses"] },
+	{ id: "moonshotai/Kimi-K2.7-Code-Highspeed", name: "Kimi K2.7 Code HighSpeed", context_length: 262000, supported_endpoints: ["/chat/completions", "/responses"] },
+	{ id: "moonshotai/Kimi-K2.6", name: "Kimi K2.6", context_length: 256000, supported_endpoints: ["/chat/completions", "/responses"] },
+	{ id: "moonshotai/Kimi-K2.5", name: "Kimi K2.5", context_length: 256000, supported_endpoints: ["/chat/completions", "/responses"] },
 ];
 
 export function fallbackModels(index: ChatCatalogIndex): Model<Api>[] {

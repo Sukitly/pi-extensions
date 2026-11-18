@@ -95,6 +95,10 @@ for (const required of [
   "xai/grok-4.5",
   "xai/grok-4.6",
   "xai/grok-4.7",
+  "moonshotai/Kimi-K3.1-Pro",
+  "moonshotai/Kimi-K3",
+  "moonshotai/Kimi-K2.7-Code",
+  "moonshotai/Kimi-K2.5",
 ]) {
   ok(baseline.some((m) => m.id === required), `baseline includes ${required}`);
 }
