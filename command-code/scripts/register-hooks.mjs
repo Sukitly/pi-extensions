@@ -1,11 +1,19 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { registerHooks } from "node:module";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 // Map "@earendil-works/pi-*" imports to the machine's Pi installation so tests
 // run without duplicating Pi's packages. A local node_modules symlink wins if
 // present (default resolution is attempted first).
-const PI_ROOT = "file:///Users/sukit/.pi/agent/install/releases/1.5.0/node_modules/";
+const install = join(homedir(), ".pi/agent/install");
+const PI_NODE_MODULES = process.env.PI_NODE_MODULES ?? join(
+  install,
+  "releases",
+  readFileSync(join(install, "current-version"), "utf8").trim(),
+  "node_modules",
+);
 const PI_PACKAGES = [
   "@earendil-works/pi-ai",
   "@earendil-works/pi-coding-agent",
@@ -29,7 +37,7 @@ export function resolve(specifier, context, nextResolve) {
       // mirror pi-ai's exports map ("." and "/<subpath>" -> "./dist/...").
       const remainder = specifier.slice(name.length);
       const distPath = `/dist${remainder === "" ? "/index" : remainder}.js`;
-      return nextResolve(`${PI_ROOT}${name}${distPath}`, context);
+      return nextResolve(pathToFileURL(join(PI_NODE_MODULES, name, distPath)).href, context);
     }
   }
   return nextResolve(specifier, context);

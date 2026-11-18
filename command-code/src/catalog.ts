@@ -26,8 +26,42 @@ import {
 export type CommandCodeModelEntry = GatewayModelEntry;
 export type CommandCodeApiResponse = { data?: CommandCodeModelEntry[] };
 
+type ThinkingLevelMap = Record<string, string | null>;
+
+/**
+ * Command Code validates `reasoning_effort` against
+ * `"off" | "low" | "medium" | "high" | "xhigh" | "max"`.
+ * Normalize upstream aliases (such as Cerebras' `"none"` or OpenRouter's
+ * `"minimal"`) so disabling or lowering thinking never sends invalid values.
+ */
+function normalizeCommandCodeThinkingMap(map: ThinkingLevelMap | undefined): ThinkingLevelMap | undefined {
+	if (!map) return undefined;
+	let changed = false;
+	const normalized: ThinkingLevelMap = {};
+	for (const [level, value] of Object.entries(map)) {
+		if (value === "none") {
+			normalized[level] = "off";
+			changed = true;
+		} else if (value === "minimal") {
+			normalized[level] = null;
+			changed = true;
+		} else {
+			normalized[level] = value;
+		}
+	}
+	return changed ? normalized : map;
+}
+
 export function matchCommandCodeModel(entry: CommandCodeModelEntry, index: ChatCatalogIndex): MatchResult | undefined {
-	return matchGatewayModel(entry, index, { provider: PROVIDER_ID, baseUrl: BASE_URL });
+	const result = matchGatewayModel(entry, index, { provider: PROVIDER_ID, baseUrl: BASE_URL });
+	if (!result) return undefined;
+	const rawMap = (result.model as unknown as { thinkingLevelMap?: ThinkingLevelMap }).thinkingLevelMap;
+	const thinkingLevelMap = normalizeCommandCodeThinkingMap(rawMap);
+	if (!thinkingLevelMap || thinkingLevelMap === rawMap) return result;
+	return {
+		...result,
+		model: { ...result.model, thinkingLevelMap } as Model<Api>,
+	};
 }
 
 /** Rebuild capabilities for persisted models without requiring a network refresh. */
@@ -48,8 +82,8 @@ export function refreshStoredModelMetadata(models: readonly Model<Api>[], index:
 }
 
 /**
- * Fallback directory used when discovery fails or Pi starts offline: at least
- * GLM-5.3 Flash, MiMo-V2.6 Flash, Muse and one Claude alias stay available.
+ * Fallback directory used when discovery fails or Pi starts offline: core
+ * baseline models plus the Qwen, Grok, and Kimi families stay available.
  * Entries are adapted the same way as live entries, resolved against the
  * built-in index.
  */
@@ -58,6 +92,30 @@ export const FALLBACK_ENTRIES: CommandCodeModelEntry[] = [
 	{ id: "xiaomi/mimo-v2.6-flash", name: "MiMo V2.6 Flash", context_length: 1048576, supported_endpoints: ["/chat/completions", "/responses"] },
 	{ id: "meta/muse-spark-1.3", name: "Muse Spark 1.3", context_length: 1048576, supported_endpoints: ["/chat/completions", "/responses"] },
 	{ id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", context_length: 200000, supported_endpoints: ["/messages"] },
+	// Qwen family
+	{ id: "Qwen/Qwen4-Max", name: "Qwen 4 Max", context_length: 1000000, supported_endpoints: ["/chat/completions", "/responses"] },
+	{ id: "Qwen/Qwen3.8-Omni-Flash", name: "Qwen 3.8 Omni Flash", context_length: 1000000, supported_endpoints: ["/chat/completions", "/responses"] },
+	{ id: "Qwen/Qwen3.8-Max-Prime", name: "Qwen 3.8 Max Prime", context_length: 1000000, supported_endpoints: ["/chat/completions", "/responses"] },
+	{ id: "Qwen/Qwen3.8-Max-0902", name: "Qwen 3.8 Max 0902", context_length: 1000000, supported_endpoints: ["/chat/completions"] },
+	{ id: "Qwen/Qwen3.8-Max", name: "Qwen 3.8 Max", context_length: 1000000, supported_endpoints: ["/chat/completions", "/responses"] },
+	{ id: "Qwen/Qwen3.8-27B", name: "Qwen 3.8 27B", context_length: 262144, supported_endpoints: ["/chat/completions", "/responses"] },
+	{ id: "Qwen/Qwen3.8-Flash", name: "Qwen 3.8 Flash", context_length: 1000000, supported_endpoints: ["/chat/completions"] },
+	{ id: "Qwen/Qwen3.7-Max", name: "Qwen 3.7 Max", context_length: 1000000, supported_endpoints: ["/chat/completions", "/responses"] },
+	{ id: "Qwen/Qwen3.7-Plus", name: "Qwen 3.7 Plus", context_length: 1000000, supported_endpoints: ["/chat/completions", "/responses"] },
+	{ id: "Qwen/Qwen3.7-Flash", name: "Qwen 3.7 Flash", context_length: 1000000, supported_endpoints: ["/chat/completions", "/responses"] },
+	{ id: "Qwen/Qwen3.6-Max-Preview", name: "Qwen 3.6 Max Preview", context_length: 200000, supported_endpoints: ["/chat/completions", "/responses"] },
+	{ id: "Qwen/Qwen3.6-Plus", name: "Qwen 3.6 Plus", context_length: 200000, supported_endpoints: ["/chat/completions", "/responses"] },
+	// Grok family
+	{ id: "xai/grok-4.5", name: "Grok 4.5", context_length: 500000, supported_endpoints: ["/chat/completions", "/responses"] },
+	{ id: "xai/grok-4.6", name: "Grok 4.6", context_length: 500000, supported_endpoints: ["/chat/completions", "/responses"] },
+	{ id: "xai/grok-4.7", name: "Grok 4.7", context_length: 500000, supported_endpoints: ["/chat/completions", "/responses"] },
+	// Kimi family
+	{ id: "moonshotai/Kimi-K3.1-Pro", name: "Kimi K3.1 Pro", context_length: 1048576, supported_endpoints: ["/chat/completions", "/responses"] },
+	{ id: "moonshotai/Kimi-K3", name: "Kimi K3", context_length: 1000000, supported_endpoints: ["/chat/completions", "/responses"] },
+	{ id: "moonshotai/Kimi-K2.7-Code", name: "Kimi K2.7 Code", context_length: 256000, supported_endpoints: ["/chat/completions", "/responses"] },
+	{ id: "moonshotai/Kimi-K2.7-Code-Highspeed", name: "Kimi K2.7 Code HighSpeed", context_length: 262000, supported_endpoints: ["/chat/completions", "/responses"] },
+	{ id: "moonshotai/Kimi-K2.6", name: "Kimi K2.6", context_length: 256000, supported_endpoints: ["/chat/completions", "/responses"] },
+	{ id: "moonshotai/Kimi-K2.5", name: "Kimi K2.5", context_length: 256000, supported_endpoints: ["/chat/completions", "/responses"] },
 ];
 
 export function fallbackModels(index: ChatCatalogIndex): Model<Api>[] {

@@ -20,6 +20,10 @@ for (const [id, name] of MODEL_IDS) {
   assert.equal(model.reasoning, true);
   assert.ok(model.contextWindow > 128000);
 }
+for (const required of ["grok-4.5", "grok-4.6", "grok-4.7", "qwen3.7-max", "qwen4-max"]) {
+  assert.ok(provider.getModels().some((m) => m.id === required), `OpenDesign includes ${required}`);
+}
+assert.deepEqual(provider.getModels().find((m) => m.id === "qwen4-max")?.input, ["text", "image"]);
 let registered: unknown;
 extension({ registerProvider: (value: unknown) => { registered = value; }, on: () => {}, registerCommand: () => {} } as never);
 assert.equal((registered as typeof provider).id, PROVIDER_ID);

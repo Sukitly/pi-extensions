@@ -85,7 +85,21 @@ ok(
 
 // baseline (offline/first-run) catalog contains the required models
 const baseline = provider.getModels();
-for (const required of ["z-ai/glm-5.3-flash", "xiaomi/mimo-v2.6-flash", "meta/muse-spark-1.3"]) {
+for (const required of [
+  "z-ai/glm-5.3-flash",
+  "xiaomi/mimo-v2.6-flash",
+  "meta/muse-spark-1.3",
+  "Qwen/Qwen4-Max",
+  "Qwen/Qwen3.8-Max",
+  "Qwen/Qwen3.6-Max-Preview",
+  "xai/grok-4.5",
+  "xai/grok-4.6",
+  "xai/grok-4.7",
+  "moonshotai/Kimi-K3.1-Pro",
+  "moonshotai/Kimi-K3",
+  "moonshotai/Kimi-K2.7-Code",
+  "moonshotai/Kimi-K2.5",
+]) {
   ok(baseline.some((m) => m.id === required), `baseline includes ${required}`);
 }
 ok(baseline.some((m) => m.id.startsWith("claude-")), "baseline includes a Claude alias");

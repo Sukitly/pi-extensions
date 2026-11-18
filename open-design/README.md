@@ -1,8 +1,9 @@
 # OpenDesign Cloud for Pi
 
 Registers OpenDesign's OpenAI Chat Completions endpoint as a native Pi provider.
-The three model IDs are fixed: `deepseek-v4.1-flash`, `minimax-m3.1-flash`
-and `glm-5.3-flash`. Availability depends on your OpenDesign account.
+The registered model IDs are `deepseek-v4.1-flash`, `minimax-m3.1-flash`,
+`glm-5.3-flash`, `grok-4.5`, `grok-4.6`, `grok-4.7`, `qwen3.7-max`, and
+`qwen4-max`. Availability depends on your OpenDesign account.
 
 This directory is in Pi's global extensions directory, so restart Pi or run
 `/reload`, then:
