@@ -15,6 +15,11 @@ export const MODEL_IDS = [
   ["deepseek-v4.1-flash", "DeepSeek V4.1 Flash"],
   ["minimax-m3.1-flash", "MiniMax M3.1 Flash"],
   ["glm-5.3-flash", "GLM-5.3 Flash"],
+  ["grok-4.5", "Grok 4.5"],
+  ["grok-4.6", "Grok 4.6"],
+  ["grok-4.7", "Grok 4.7"],
+  ["qwen3.7-max", "Qwen 3.7 Max"],
+  ["qwen4-max", "Qwen 4 Max"],
 ] as const;
 
 export function buildOpenDesignProvider(index?: ChatCatalogIndex): Provider {

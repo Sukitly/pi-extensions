@@ -89,6 +89,150 @@ function defaultMaxTokens(contextWindow: number): number {
 export const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
 
 /**
+ * Supplemental metadata for gateway models missing a compatible entry in Pi's
+ * built-in catalog. Used only when primary index lookup finds no matching API.
+ */
+const SUPPLEMENTAL_MODELS: BuiltinModelLike[] = [
+	{
+		id: "qwen4-max",
+		name: "Qwen 4 Max",
+		api: "openai-completions",
+		provider: "qwen-token-plan",
+		baseUrl: "",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { ...ZERO_COST },
+		contextWindow: 1000000,
+		maxTokens: 131072,
+		compat: {
+			supportsStrictMode: true,
+			supportsDeveloperRole: false,
+			supportsStore: false,
+			supportsReasoningEffort: true,
+		},
+		thinkingLevelMap: {
+			off: "off",
+			minimal: null,
+			low: "low",
+			medium: "medium",
+			high: "high",
+			xhigh: "xhigh",
+			max: null,
+		},
+	},
+	{
+		id: "qwen3.6-max-preview",
+		name: "Qwen 3.6 Max Preview",
+		api: "openai-completions",
+		provider: "qwen-token-plan",
+		baseUrl: "",
+		reasoning: true,
+		input: ["text"],
+		cost: { ...ZERO_COST },
+		contextWindow: 200000,
+		maxTokens: 131072,
+		compat: {
+			supportsStrictMode: true,
+			supportsDeveloperRole: false,
+			supportsStore: false,
+			supportsReasoningEffort: true,
+		},
+		thinkingLevelMap: {
+			off: "off",
+			minimal: null,
+			low: "low",
+			medium: "medium",
+			high: "high",
+			xhigh: null,
+			max: null,
+		},
+	},
+	{
+		id: "grok-4.5",
+		name: "Grok 4.5",
+		api: "openai-completions",
+		provider: "xai",
+		baseUrl: "",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { ...ZERO_COST },
+		contextWindow: 500000,
+		maxTokens: 128000,
+		compat: { supportsStrictMode: true, supportsDeveloperRole: false },
+		thinkingLevelMap: {
+			off: null,
+			minimal: null,
+			low: "low",
+			medium: "medium",
+			high: "high",
+			xhigh: null,
+			max: null,
+		},
+	},
+	{
+		id: "grok-4.6",
+		name: "Grok 4.6",
+		api: "openai-completions",
+		provider: "xai",
+		baseUrl: "",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { ...ZERO_COST },
+		contextWindow: 500000,
+		maxTokens: 128000,
+		compat: { supportsStrictMode: true, supportsDeveloperRole: false },
+		thinkingLevelMap: {
+			off: null,
+			minimal: null,
+			low: "low",
+			medium: "medium",
+			high: "high",
+			xhigh: "xhigh",
+			max: null,
+		},
+	},
+	{
+		id: "grok-4.7",
+		name: "Grok 4.7",
+		api: "openai-completions",
+		provider: "xai",
+		baseUrl: "",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { ...ZERO_COST },
+		contextWindow: 500000,
+		maxTokens: 128000,
+		compat: { supportsStrictMode: true, supportsDeveloperRole: false },
+		thinkingLevelMap: {
+			off: null,
+			minimal: null,
+			low: "low",
+			medium: "medium",
+			high: "high",
+			xhigh: "xhigh",
+			max: null,
+		},
+	},
+];
+
+const SUPPLEMENTAL_INDEX = buildChatCatalogIndex(SUPPLEMENTAL_MODELS);
+
+function collectCandidates(
+	entry: GatewayModelEntry,
+	index: ChatCatalogIndex,
+): Array<[BuiltinModelLike, "builtin-id" | "builtin-name"]> {
+	const bare = lastPathSegment(entry.id);
+	const candidates: Array<[BuiltinModelLike, "builtin-id" | "builtin-name"]> = [];
+	for (const id of [normalizeKey(bare), normalizeKey(entry.id)]) {
+		for (const model of index.idVariants.get(id) ?? []) candidates.push([model, "builtin-id"]);
+	}
+	for (const model of index.nameVariants.get(normalizeKey(entry.name ?? entry.id)) ?? []) {
+		candidates.push([model, "builtin-name"]);
+	}
+	return candidates;
+}
+
+/**
  * Adapt one gateway catalog entry into a Pi chat model, reusing the best
  * matching Pi built-in for capability metadata. The cost is always reset:
  * gateway plan billing is credit-based, so per-token vendor prices would
@@ -104,17 +248,16 @@ export function matchGatewayModel(
 	const api = apiForEndpoints(endpoints);
 	if (!api || !entry.id) return undefined;
 
-	const bare = lastPathSegment(entry.id);
-	const candidates: Array<[BuiltinModelLike, "builtin-id" | "builtin-name"]> = [];
-	for (const id of [normalizeKey(bare), normalizeKey(entry.id)]) {
-		for (const model of index.idVariants.get(id) ?? []) candidates.push([model, "builtin-id"]);
-	}
-	for (const model of index.nameVariants.get(normalizeKey(entry.name ?? entry.id)) ?? []) {
-		candidates.push([model, "builtin-name"]);
-	}
+	const candidates = collectCandidates(entry, index);
+	const supplemental = collectCandidates(entry, SUPPLEMENTAL_INDEX);
 	// The same model ID occurs under several providers/protocols. Prefer one
-	// that actually speaks gateway's advertised endpoint.
-	const [builtin, matched] = candidates.find(([model]) => model.api === api) ?? candidates[0] ?? [];
+	// that actually speaks gateway's advertised endpoint, falling back to
+	// supplemental metadata before settling for an incompatible protocol.
+	const [builtin, matched] =
+		candidates.find(([model]) => model.api === api) ??
+		supplemental.find(([model]) => model.api === api) ??
+		candidates[0] ??
+		[];
 
 	const contextWindow =
 		typeof entry.context_length === "number" && entry.context_length > 0

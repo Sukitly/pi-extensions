@@ -133,6 +133,34 @@ eq(mismatchedOnly?.reasoning, false, "no compatible protocol means thinking stay
 eq(mismatchedOnly?.thinkingLevelMap, undefined, "incompatible thinking map is not leaked");
 eq(mismatchedOnly?.compat, undefined, "incompatible transport flags are not leaked");
 
+// Command Code reasoning_effort normalization: "none" -> "off", "minimal" -> null
+const cerebrasQwenBuiltin: BuiltinModelLike = {
+  ...glmBuiltIn,
+  id: "qwen-3.8-27b",
+  name: "Qwen3.8 27B",
+  compat: { supportsStore: false, supportsDeveloperRole: false },
+  thinkingLevelMap: { off: "none", minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: null, max: null },
+};
+const cerebrasIndex = buildChatCatalogIndex([cerebrasQwenBuiltin]);
+const qwen27bEntry: CommandCodeModelEntry = {
+  id: "Qwen/Qwen3.8-27B",
+  name: "Qwen 3.8 27B",
+  context_length: 262144,
+  supported_endpoints: ["/chat/completions", "/responses"],
+};
+const qwen27bMatch = matchCommandCodeModel(qwen27bEntry, cerebrasIndex)?.model;
+eq(
+  qwen27bMatch?.thinkingLevelMap,
+  { off: "off", minimal: null, low: "low", medium: "medium", high: "high", xhigh: null, max: null },
+  "Command Code normalizes unsupported 'none'/'minimal' reasoning_effort values",
+);
+const staleQwen27b = { ...qwen27bMatch!, thinkingLevelMap: cerebrasQwenBuiltin.thinkingLevelMap };
+eq(
+  refreshStoredModelMetadata([staleQwen27b], cerebrasIndex)[0]?.thinkingLevelMap?.off,
+  "off",
+  "refreshStoredModelMetadata repairs cached 'none' thinking mapping",
+);
+
 // ---------------------------------------------------------------------------
 // endpoint routing
 // ---------------------------------------------------------------------------
@@ -242,6 +270,25 @@ eq(unknownMatch?.model.contextWindow, 256000, "synthesized keeps server context"
 eq(unknownMatch?.model.reasoning, false, "synthesized model is conservative about reasoning");
 eq(unknownMatch?.model.api, "openai-completions", "synthesized routes by endpoint");
 
+// supplemental Qwen metadata (when not yet present in Pi's built-in catalog)
+const qwen4MaxMatch = matchCommandCodeModel(
+  { id: "Qwen/Qwen4-Max", name: "Qwen 4 Max", context_length: 1000000, supported_endpoints: ["/chat/completions", "/responses"] },
+  index,
+);
+eq(qwen4MaxMatch?.matched, "builtin-id", "Qwen 4 Max matches supplemental metadata");
+eq(qwen4MaxMatch?.model.reasoning, true, "Qwen 4 Max enables reasoning");
+eq(qwen4MaxMatch?.model.input, ["text", "image"], "Qwen 4 Max supports image input");
+eq(qwen4MaxMatch?.model.contextWindow, 1000000, "Qwen 4 Max keeps 1M context");
+
+const qwen36MaxPreviewMatch = matchCommandCodeModel(
+  { id: "Qwen/Qwen3.6-Max-Preview", name: "Qwen 3.6 Max Preview", context_length: 200000, supported_endpoints: ["/chat/completions", "/responses"] },
+  index,
+);
+eq(qwen36MaxPreviewMatch?.matched, "builtin-id", "Qwen 3.6 Max Preview matches supplemental metadata");
+eq(qwen36MaxPreviewMatch?.model.reasoning, true, "Qwen 3.6 Max Preview enables reasoning");
+eq(qwen36MaxPreviewMatch?.model.input, ["text"], "Qwen 3.6 Max Preview is text-only");
+eq(qwen36MaxPreviewMatch?.model.contextWindow, 200000, "Qwen 3.6 Max Preview keeps 200k context");
+
 // unusable endpoint → no model
 eq(
   matchCommandCodeModel({ id: "x/unknown", supported_endpoints: ["/grpc"] }, index),
@@ -261,6 +308,12 @@ eq(fallback.length, FALLBACK_ENTRIES.length, "fallback count");
 ok(fallback.some((m) => m.id === "z-ai/glm-5.3-flash"), "GLM-5.3 Flash in fallback");
 ok(fallback.some((m) => m.id === "xiaomi/mimo-v2.6-flash"), "MiMo-V2.6 Flash in fallback");
 ok(fallback.some((m) => m.id.startsWith("meta/muse-")), "Muse in fallback");
+ok(fallback.some((m) => m.id === "Qwen/Qwen4-Max"), "Qwen 4 Max in fallback");
+ok(fallback.some((m) => m.id === "Qwen/Qwen3.8-Max"), "Qwen 3.8 Max in fallback");
+ok(fallback.some((m) => m.id === "Qwen/Qwen3.6-Plus"), "Qwen 3.6 Plus in fallback");
+ok(fallback.some((m) => m.id === "xai/grok-4.5"), "Grok 4.5 in fallback");
+ok(fallback.some((m) => m.id === "xai/grok-4.6"), "Grok 4.6 in fallback");
+ok(fallback.some((m) => m.id === "xai/grok-4.7"), "Grok 4.7 in fallback");
 ok(fallback.every((m) => m.provider === PROVIDER_ID), "fallback models owned by command-code");
 ok(fallback.every((m) => m.cost.input === 0 && m.cost.output === 0), "fallback costs zeroed");
 
