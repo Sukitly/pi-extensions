@@ -68,6 +68,28 @@ interface OpenCodeGoStatusResponse {
 	} | null;
 }
 
+interface XaiBillingPeriod {
+	type?: string | null;
+	start?: string | null;
+	end?: string | null;
+}
+
+interface XaiBillingAmount {
+	val?: number | string | null;
+}
+
+interface XaiBillingResponse {
+	config?: {
+		currentPeriod?: XaiBillingPeriod | null;
+		creditUsagePercent?: number | null;
+		isUnifiedBillingUser?: boolean | null;
+		monthlyLimit?: XaiBillingAmount | null;
+		used?: XaiBillingAmount | null;
+		billingPeriodStart?: string | null;
+		billingPeriodEnd?: string | null;
+	} | null;
+}
+
 function pad2(n: number): string {
 	return n.toString().padStart(2, "0");
 }
@@ -316,6 +338,63 @@ function normalizeOpenCodeGoUsage(data: OpenCodeGoStatusResponse): UsageResponse
 	return { windows };
 }
 
+function normalizeXaiPeriodLabel(periodType: string, windowSeconds: number): string {
+	if (periodType === "USAGE_PERIOD_TYPE_WEEKLY") return "7d";
+	if (periodType === "USAGE_PERIOD_TYPE_MONTHLY") return "30d";
+	if (periodType === "USAGE_PERIOD_TYPE_DAILY") return "1d";
+	if (windowSeconds >= DAY_SECONDS) return `${Math.round(windowSeconds / DAY_SECONDS)}d`;
+	return formatWindowDuration(Math.round(windowSeconds));
+}
+
+function normalizeXaiUsage(data: XaiBillingResponse): UsageResponse {
+	const config = data?.config;
+	if (!config) return { windows: [] };
+
+	const period = config.currentPeriod;
+	const periodType = period?.type ?? "";
+	const startsAt = period?.start ?? config.billingPeriodStart ?? null;
+	const resetsAt = period?.end ?? config.billingPeriodEnd ?? null;
+	const startMs = startsAt ? new Date(startsAt).getTime() : Number.NaN;
+	const resetMs = resetsAt ? new Date(resetsAt).getTime() : Number.NaN;
+
+	let utilization: number | null = null;
+	let fallbackWindowSeconds = SEVEN_DAYS_SECONDS;
+	if (periodType === "USAGE_PERIOD_TYPE_DAILY") fallbackWindowSeconds = DAY_SECONDS;
+	else if (periodType === "USAGE_PERIOD_TYPE_MONTHLY") fallbackWindowSeconds = THIRTY_DAYS_SECONDS;
+
+	if (typeof config.creditUsagePercent === "number" && Number.isFinite(config.creditUsagePercent)) {
+		utilization = Math.min(100, Math.max(0, config.creditUsagePercent));
+	} else if (period || config.isUnifiedBillingUser === true) {
+		// Proto3 JSON omits zero-valued scalar fields, so an active period with no creditUsagePercent means 0%.
+		utilization = 0;
+	} else {
+		const limit = parseMicroCents(config.monthlyLimit?.val);
+		const used = parseMicroCents(config.used?.val);
+		if (limit !== null && limit > 0 && used !== null) {
+			utilization = Math.min(100, Math.max(0, (used / limit) * 100));
+			fallbackWindowSeconds = THIRTY_DAYS_SECONDS;
+		}
+	}
+
+	if (utilization === null) return { windows: [] };
+
+	const windowSeconds =
+		Number.isFinite(resetMs) && Number.isFinite(startMs) && resetMs > startMs
+			? (resetMs - startMs) / 1000
+			: fallbackWindowSeconds;
+
+	return {
+		windows: [
+			{
+				label: normalizeXaiPeriodLabel(periodType, windowSeconds),
+				utilization,
+				resetsAt,
+				windowSeconds,
+			},
+		],
+	};
+}
+
 function resolveUsageForModel(data: UsageResponse | null, modelId?: string): UsageResponse | null {
 	if (!data) return null;
 	if (!data.groups) return data;
@@ -341,6 +420,7 @@ function formatUsageError(error: unknown, apiKey?: string): string {
 		.replace(/Bearer\s+[^\s"',;]+/gi, "Bearer [redacted]")
 		.replace(/sk-[\w-]+/g, "[redacted]")
 		.replace(/oc_sk_[\w-]+/g, "[redacted]")
+		.replace(/xai-[\w-]+/g, "[redacted]")
 		.replace(/ya29\.[a-zA-Z0-9_-]+/g, "[redacted]")
 		.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, " ")
 		.replace(/\s+/g, " ")
@@ -405,16 +485,34 @@ async function fetchOpenCodeGoUsage(apiKey: string): Promise<UsageResponse> {
 	return normalizeOpenCodeGoUsage((await requireUsageResponse(response)) as OpenCodeGoStatusResponse);
 }
 
+const XAI_BILLING_ENDPOINT = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
+
+async function fetchXaiUsage(apiKey: string): Promise<UsageResponse> {
+	if (!apiKey) throw new Error("Missing xAI OAuth credentials; please log in");
+
+	const response = await fetch(XAI_BILLING_ENDPOINT, {
+		method: "GET",
+		headers: {
+			Accept: "application/json",
+			Authorization: `Bearer ${apiKey}`,
+			"x-xai-token-auth": "xai-grok-cli",
+		},
+		signal: AbortSignal.timeout(10000),
+	});
+	return normalizeXaiUsage((await requireUsageResponse(response)) as XaiBillingResponse);
+}
+
 async function fetchUsage(provider: string, apiKey: string): Promise<UsageResponse | null> {
 	if (provider === "openai-codex") return fetchCodexUsage(apiKey);
 	if (provider === "opencode-go") return fetchOpenCodeGoUsage(apiKey);
+	if (provider === "xai") return fetchXaiUsage(apiKey);
 	return null;
 }
 
 function supportsUsageWidget(
 	provider: string | null | undefined,
-): provider is "openai-codex" | "opencode-go" {
-	return provider === "openai-codex" || provider === "opencode-go";
+): provider is "openai-codex" | "opencode-go" | "xai" {
+	return provider === "openai-codex" || provider === "opencode-go" || provider === "xai";
 }
 
 const WIDGET_ID = "provider-usage";
@@ -452,11 +550,33 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	function showWidget(ctx: ExtensionContext, provider: string | null, modelId?: string) {
+	function isUsingOAuthFor(
+		ctx: ExtensionContext,
+		provider: string,
+		model: ExtensionContext["model"] = ctx.model,
+	): boolean {
+		return Boolean(model?.provider === provider && ctx.modelRegistry.isUsingOAuth(model));
+	}
+
+	function canQueryUsage(
+		ctx: ExtensionContext,
+		provider: string | null,
+		model: ExtensionContext["model"] = ctx.model,
+	): provider is "openai-codex" | "opencode-go" | "xai" {
+		if (!supportsUsageWidget(provider)) return false;
+		if (provider === "xai") return isUsingOAuthFor(ctx, "xai", model);
+		return true;
+	}
+
+	function showWidget(
+		ctx: ExtensionContext,
+		provider: string | null,
+		modelId?: string,
+		model?: ExtensionContext["model"],
+	) {
 		if (provider === "openai") {
 			ignoreStaleContext(() => {
-				const model = ctx.model;
-				const isSubscription = model?.provider === "openai" && ctx.modelRegistry.isUsingOAuth(model);
+				const isSubscription = isUsingOAuthFor(ctx, "openai", model ?? ctx.model);
 				ctx.ui.setWidget(
 					WIDGET_ID,
 					isSubscription
@@ -466,6 +586,16 @@ export default function (pi: ExtensionAPI) {
 				);
 			});
 			return;
+		}
+		if (provider === "xai") {
+			let isSubscription = false;
+			ignoreStaleContext(() => {
+				isSubscription = isUsingOAuthFor(ctx, "xai", model ?? ctx.model);
+			});
+			if (!isSubscription) {
+				hideWidget(ctx);
+				return;
+			}
 		}
 		const rawData = getCachedUsage(provider);
 		const data = resolveUsageForModel(rawData, modelId ?? ctx.model?.id);
@@ -492,8 +622,13 @@ export default function (pi: ExtensionAPI) {
 		});
 	}
 
-	async function refreshUsage(ctx: ExtensionContext, provider: string | null, force = false) {
-		if (!provider || !supportsUsageWidget(provider)) return;
+	async function refreshUsage(
+		ctx: ExtensionContext,
+		provider: string | null,
+		force = false,
+		model: ExtensionContext["model"] = ctx.model,
+	) {
+		if (!canQueryUsage(ctx, provider, model)) return;
 		const cached = usageCache.get(provider);
 		if (!force && !usageErrors.has(provider) && cached && Date.now() - cached.refreshedAt < MIN_REFRESH_GAP_MS) return;
 		const existingRefresh = usageRefreshes.get(provider);
@@ -531,8 +666,9 @@ export default function (pi: ExtensionAPI) {
 		provider: string,
 		token: number,
 		force = false,
+		model?: ExtensionContext["model"],
 	) {
-		void refreshUsage(ctx, provider, force)
+		void refreshUsage(ctx, provider, force, model)
 			.then(() => {
 				if (!isCurrent(token, provider)) return;
 				showWidget(ctx, provider);
@@ -554,7 +690,7 @@ export default function (pi: ExtensionAPI) {
 		activeProvider = provider;
 
 		showWidget(ctx, provider);
-		if (supportsUsageWidget(provider)) {
+		if (canQueryUsage(ctx, provider)) {
 			refreshInBackground(ctx, provider, token, true);
 		}
 	});
@@ -566,8 +702,10 @@ export default function (pi: ExtensionAPI) {
 
 		if (provider === "openai") {
 			showWidget(ctx, provider);
-		} else if (supportsUsageWidget(provider)) {
+		} else if (canQueryUsage(ctx, provider)) {
 			refreshInBackground(ctx, provider, token);
+		} else if (provider === "xai") {
+			showWidget(ctx, provider);
 		}
 	});
 
@@ -577,9 +715,9 @@ export default function (pi: ExtensionAPI) {
 		const token = lifecycleToken;
 		activeProvider = provider;
 
-		showWidget(ctx, provider, event.model.id);
-		if (supportsUsageWidget(provider)) {
-			refreshInBackground(ctx, provider, token);
+		showWidget(ctx, provider, event.model.id, event.model);
+		if (canQueryUsage(ctx, provider, event.model)) {
+			refreshInBackground(ctx, provider, token, false, event.model);
 		}
 	});
 }

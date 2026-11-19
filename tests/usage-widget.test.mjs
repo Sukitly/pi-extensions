@@ -308,3 +308,146 @@ test("opencode-go redacts oc_sk_ tokens echoed by a failing console response", a
 	assert.match(h.text, /\[redacted\]/);
 	assert.doesNotMatch(h.text, new RegExp(token));
 });
+
+const xaiBillingPayload = {
+	config: {
+		currentPeriod: {
+			type: "USAGE_PERIOD_TYPE_WEEKLY",
+			start: "2026-11-19T06:03:23.888+00:00",
+			end: "2026-11-26T06:03:23.888+00:00",
+		},
+		creditUsagePercent: 1.0,
+		productUsage: [{ product: "Api", usagePercent: 1.0 }],
+		isUnifiedBillingUser: true,
+		prepaidBalance: { val: 0 },
+		billingPeriodStart: "2026-11-19T06:03:23.888+00:00",
+		billingPeriodEnd: "2026-11-26T06:03:23.888+00:00",
+	},
+};
+
+test("xai OAuth reads weekly credit usage from cli-chat-proxy billing endpoint", async () => {
+	let requests = 0;
+	let lastUrl = "";
+	let lastHeaders = {};
+	const token = "eyJhbGciOiJSUzI1NiJ9.payload.sig";
+	const h = harness({
+		provider: "xai",
+		key: token,
+		oauth: true,
+		fetch: async (url, options) => {
+			requests++;
+			lastUrl = url;
+			lastHeaders = options?.headers ?? {};
+			return Response.json(xaiBillingPayload);
+		},
+	});
+
+	await h.emit("session_start", { model: { id: "grok-4", provider: "xai" } });
+	assert.equal(lastUrl, "https://cli-chat-proxy.grok.com/v1/billing?format=credits");
+	assert.equal(lastHeaders.Authorization, `Bearer ${token}`);
+	assert.equal(lastHeaders["x-xai-token-auth"], "xai-grok-cli");
+	assert.equal(requests, 1);
+	assert.match(h.text, /7d: \[[^\]]*\] 1% ~ (Sun|Mon|Tue|Wed|Thu|Fri|Sat) \d{2}:\d{2} [▲▼]\d+\.\d%/);
+});
+
+test("xai OAuth treats omitted proto3 creditUsagePercent as 0% when currentPeriod is active", async () => {
+	const h = harness({
+		provider: "xai",
+		key: "xai-oauth-token",
+		oauth: true,
+		fetch: async () => Response.json({
+			config: {
+				currentPeriod: {
+					type: "USAGE_PERIOD_TYPE_WEEKLY",
+					start: "2026-11-19T06:03:23.888+00:00",
+					end: "2026-11-26T06:03:23.888+00:00",
+				},
+				isUnifiedBillingUser: true,
+			},
+		}),
+	});
+
+	await h.emit();
+	assert.match(h.text, /7d: \[░{10}\] 0%/);
+});
+
+test("xai API keys and non-interactive sessions stay hidden without usage requests", async () => {
+	let requests = 0;
+	let credentialReads = 0;
+	for (const options of [{ oauth: false }, { oauth: true, hasUI: false }]) {
+		const h = harness({
+			provider: "xai",
+			...options,
+			credentials: async () => { credentialReads++; return "xai-secret-key"; },
+			fetch: async () => { requests++; return Response.json(xaiBillingPayload); },
+		});
+		await h.emit();
+		await h.emit("agent_end");
+		await h.emit("model_select", { model: { id: "grok-4", provider: "xai" } });
+		assert.equal(h.text, "");
+	}
+	assert.equal(requests, 0);
+	assert.equal(credentialReads, 0);
+});
+
+test("xai follows OAuth login and logout without showing cached data in API key mode", async () => {
+	let requests = 0;
+	const h = harness({
+		provider: "xai",
+		key: "xai-oauth-token",
+		oauth: true,
+		fetch: async () => {
+			requests++;
+			return Response.json({
+				config: {
+					currentPeriod: {
+						type: "USAGE_PERIOD_TYPE_WEEKLY",
+						start: "2026-11-19T06:03:23.888+00:00",
+						end: "2026-11-26T06:03:23.888+00:00",
+					},
+					creditUsagePercent: 42,
+				},
+			});
+		},
+	});
+	await h.emit();
+	assert.match(h.text, /7d:.*42%/);
+	assert.equal(requests, 1);
+
+	h.setOAuth(false);
+	await h.emit("agent_end");
+	assert.equal(h.text, "");
+	assert.equal(requests, 1);
+
+	h.setOAuth(true);
+	await h.emit("model_select", { model: { id: "grok-4", provider: "xai" } });
+	assert.match(h.text, /7d:.*42%/);
+});
+
+test("xai falls back to legacy monthlyLimit and redacts xai- tokens on error", async () => {
+	const legacy = harness({
+		provider: "xai",
+		key: "xai-oauth-token",
+		oauth: true,
+		fetch: async () => Response.json({
+			config: {
+				monthlyLimit: { val: 200 },
+				used: { val: 50 },
+				billingPeriodStart: "2026-11-01T00:00:00+00:00",
+				billingPeriodEnd: "2026-12-01T00:00:00+00:00",
+			},
+		}),
+	});
+	await legacy.emit();
+	assert.match(legacy.text, /30d: \[[^\]]*\] 25%/);
+
+	const failing = harness({
+		provider: "xai",
+		key: "xai-secret-12345",
+		oauth: true,
+		fetch: async () => Response.json({ error: { message: "bad key xai-other-99999 Bearer xai-secret-12345" } }, { status: 401, statusText: "Unauthorized" }),
+	});
+	await failing.emit();
+	assert.match(failing.text, /xai usage: refresh failed.*HTTP 401 Unauthorized/);
+	assert.doesNotMatch(failing.text, /xai-secret-12345|xai-other-99999/);
+});
