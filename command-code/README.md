@@ -23,8 +23,8 @@ as a native provider — no `models.json` edits, no changes to your `usage-widge
      server, not vendor per-token USD prices, so copying e.g. Anthropic's prices would show
      fictitious spend. Real consumption is shown in the usage widget instead.
    - Discovery failures (endpoint down, offline, no key) never clear registered models: the
-     last-known-good catalog is restored from Pi's models store, and a fallback directory
-     (GLM-5.3 Flash, MiMo-V2.6 Flash, Muse Spark 1.3, Claude Sonnet 4.6) covers first runs.
+     last-known-good catalog is restored from Pi's models store. A fallback catalog
+     covers first runs, including DeepSeek V4 Pro, V4 Flash, and V4.1 Flash.
 
 2. **Native login** — `/login command-code` prompts for the Command Code API key and Pi
    stores it in its normal credential store (`~/.pi/agent/auth.json`, `api_key` type).
@@ -64,9 +64,9 @@ so it loads on the next `pi` start (or `/reload` in an active session).
   Whether Free plans can list models/usage is unconfirmed.
 - `/alpha/billing/credits` is an alpha endpoint and its response shape may drift; the
   parser is lenient (camel/snake, seconds vs ms timestamps) and fails loudly.
-- Before the first `/login`, only the fallback quartet is registered (Pi skips catalog
-  refresh for unconfigured providers); after login the full live list is published and
-  persisted (checkedAt freshness window: 4 h, override with `COMMAND_CODE_CATALOG_REFRESH_MS`).
+- Pi skips online catalog refresh for unconfigured providers. Once configured, it
+  persists the live list and refreshes it 4 h after the last successful check
+  (override with `COMMAND_CODE_CATALOG_REFRESH_MS`).
 
 ## Real-account validation checklist
 

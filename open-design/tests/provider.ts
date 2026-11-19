@@ -20,7 +20,7 @@ for (const [id, name] of MODEL_IDS) {
   assert.equal(model.reasoning, true);
   assert.ok(model.contextWindow > 128000);
 }
-for (const required of ["grok-4.5", "grok-4.6", "grok-4.7", "qwen3.7-max", "qwen4-max"]) {
+for (const required of ["deepseek-v4-pro", "grok-4.5", "grok-4.6", "grok-4.7", "qwen3.7-max", "qwen4-max"]) {
   assert.ok(provider.getModels().some((m) => m.id === required), `OpenDesign includes ${required}`);
 }
 assert.deepEqual(provider.getModels().find((m) => m.id === "qwen4-max")?.input, ["text", "image"]);

@@ -83,7 +83,7 @@ export function refreshStoredModelMetadata(models: readonly Model<Api>[], index:
 
 /**
  * Fallback directory used when discovery fails or Pi starts offline: core
- * baseline models plus the Qwen, Grok, and Kimi families stay available.
+ * baseline models plus the DeepSeek, Qwen, Grok, and Kimi families stay available.
  * Entries are adapted the same way as live entries, resolved against the
  * built-in index.
  */
@@ -92,6 +92,10 @@ export const FALLBACK_ENTRIES: CommandCodeModelEntry[] = [
 	{ id: "xiaomi/mimo-v2.6-flash", name: "MiMo V2.6 Flash", context_length: 1048576, supported_endpoints: ["/chat/completions", "/responses"] },
 	{ id: "meta/muse-spark-1.3", name: "Muse Spark 1.3", context_length: 1048576, supported_endpoints: ["/chat/completions", "/responses"] },
 	{ id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", context_length: 200000, supported_endpoints: ["/messages"] },
+	// DeepSeek family
+	{ id: "deepseek/deepseek-v4-pro", name: "DeepSeek V4 Pro (latest)", context_length: 1000000, supported_endpoints: ["/chat/completions", "/responses"] },
+	{ id: "deepseek/deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash (latest)", context_length: 1000000, supported_endpoints: ["/chat/completions", "/responses"] },
+	{ id: "deepseek/deepseek-v4-flash", name: "DeepSeek V4 Flash (latest)", context_length: 1000000, supported_endpoints: ["/chat/completions", "/responses"] },
 	// Qwen family
 	{ id: "Qwen/Qwen4-Max", name: "Qwen 4 Max", context_length: 1000000, supported_endpoints: ["/chat/completions", "/responses"] },
 	{ id: "Qwen/Qwen3.8-Omni-Flash", name: "Qwen 3.8 Omni Flash", context_length: 1000000, supported_endpoints: ["/chat/completions", "/responses"] },

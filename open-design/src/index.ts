@@ -13,6 +13,7 @@ export const PROVIDER_ID = "open-design";
 export const BASE_URL = "https://amr-link.open-design.ai/v1";
 export const MODEL_IDS = [
   ["deepseek-v4.1-flash", "DeepSeek V4.1 Flash"],
+  ["deepseek-v4-pro", "DeepSeek V4 Pro"],
   ["minimax-m3.1-flash", "MiniMax M3.1 Flash"],
   ["glm-5.3-flash", "GLM-5.3 Flash"],
   ["grok-4.5", "Grok 4.5"],
