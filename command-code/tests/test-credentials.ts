@@ -1,16 +1,17 @@
 // Tests: provider wiring (native api_key auth via Pi's envApiKeyAuth, native
-// protocol implementations, fetchModels freshness/fallback semantics).
+// protocol implementations, catalog refresh and fallback semantics).
 import { inspect } from "node:util";
 import {
   BASE_URL,
   buildChatCatalogIndex,
-  FALLBACK_ENTRIES,
+  MODELS_URL,
   fallbackModels,
   PROVIDER_ID,
   PROVIDER_NAME,
 } from "../src/catalog.ts";
 import { buildCommandCodeProvider } from "../src/index.ts";
 import { getBuiltinModels, getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
+import type { RefreshModelsContext } from "@earendil-works/pi-ai/models";
 
 let passed = 0;
 const failures: string[] = [];
@@ -84,8 +85,12 @@ ok(
 );
 
 // baseline (offline/first-run) catalog contains the required models
+const deepSeekPro = "deepseek/deepseek-v4-pro";
 const baseline = provider.getModels();
 for (const required of [
+  deepSeekPro,
+  "deepseek/deepseek-v4-flash",
+  "deepseek/deepseek-v4.1-flash",
   "z-ai/glm-5.3-flash",
   "xiaomi/mimo-v2.6-flash",
   "meta/muse-spark-1.3",
@@ -110,27 +115,71 @@ ok(
 );
 
 // ---------------------------------------------------------------------------
-// fetchModels: freshness, fallback, no-wipe on failure
+// Refresh regression: a truncated legacy snapshot must be fetched again;
+// typed and untyped chat models must survive subsequent cache restores.
 // ---------------------------------------------------------------------------
 
-// Reach into the provider's refresh contract through pi-ai's public shape.
-const refresh = provider.refreshModels!;
-type PublishInput = { models?: unknown[]; [key: string]: unknown };
+const visionId = "deepseek/deepseek-v4-flash-vision-exp";
+const legacyId = "legacy/cached-chat";
+const qwen = fallbackModels(builtinIndex).find((model) => model.id === "Qwen/Qwen4-Max")!;
+let stored: RefreshModelsContext["stored"] = {
+  models: [{ ...qwen, type: undefined, id: legacyId }],
+  checkedAt: Date.now(),
+};
+let writes = 0;
+let fetches = 0;
+let fail = false;
+const originalFetch = globalThis.fetch;
+globalThis.fetch = async (url) => {
+  fetches++;
+  eq(String(url), MODELS_URL, "refresh uses the Command Code catalog");
+  if (fail) return new Response("network unavailable", { status: 503 });
+  return Response.json({ data: [deepSeekPro, visionId].map((id) => ({
+    id, context_length: 1000000, supported_endpoints: ["/chat/completions"],
+  })) });
+};
+function refresh(target = provider, allowNetwork = true, force = false) {
+  return target.refreshModels!({
+    stored, allowNetwork, force, signal: new AbortController().signal,
+    publish: async ({ persist, update }) => {
+      if (persist) { stored = persist; writes++; }
+      update?.();
+      return true;
+    },
+  });
+}
 
-const storedModels = fallbackModels(builtinIndex);
+try {
+  await refresh(provider, false);
+  eq(fetches, 0, "offline refresh does not fetch");
+  eq(writes, 0, "offline refresh does not rewrite the cache");
+  ok(provider.getModels().some((model) => model.id === legacyId), "offline restore accepts untyped chat models");
 
-await refresh({
-  credential: { type: "api_key", key: "cc_sk_cache" },
-  stored: { models: storedModels, checkedAt: Date.now() },
-  publish: async (publication: { persist?: PublishInput | null; update?: () => void }) => {
-    if (publication.update) publication.update();
-    return true;
-  },
-  allowNetwork: false,
-  signal: new AbortController().signal,
-});
-// offline + fresh cache → catalog preserved, no network, persist not clobbered
-ok(provider.getModels().length >= FALLBACK_ENTRIES.length - 1, "offline cache restored (≥ required models remain)");
+  await refresh();
+  eq(fetches, 1, "a recent but legacy-only cache is rechecked");
+  eq(writes, 1, "successful refresh saves the new catalog");
+  ok(stored?.models.some((model) => model.id === deepSeekPro && model.type === "chat"), "DeepSeek Pro is persisted as chat");
+  ok(provider.getModels().some((model) => model.id === visionId), "live discovery adds DeepSeek Vision");
+  eq(provider.getAllModels?.().filter((model) => model.id === deepSeekPro).length, 1, "live DeepSeek Pro overrides its fallback");
+
+  const refreshed = stored;
+  const restarted = buildCommandCodeProvider(builtinIndex);
+  await refresh(restarted);
+  eq(fetches, 1, "fresh cache skips discovery across restart");
+  eq(writes, 1, "reusing the cache does not advance the last successful check");
+  ok(restarted.getModels().some((model) => model.id === visionId), "cached typed DeepSeek survives restart");
+
+  fail = true;
+  let refreshError: unknown;
+  try { await refresh(restarted, true, true); } catch (error) { refreshError = error; }
+  eq(fetches, 2, "forced refresh bypasses freshness");
+  ok(refreshError instanceof Error && refreshError.message.includes("503"), "failed force refresh reports the server error");
+  ok(stored === refreshed, "failed refresh leaves the stored snapshot unchanged");
+  eq(writes, 1, "failed refresh does not touch the cache timestamp");
+  ok(restarted.getModels().some((model) => model.id === visionId), "failed refresh retains the last known DeepSeek catalog");
+} finally {
+  globalThis.fetch = originalFetch;
+}
 
 report();
 

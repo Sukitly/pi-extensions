@@ -22,6 +22,7 @@ import {
 	openAIResponsesApi,
 	type RefreshModelsContext,
 } from "@earendil-works/pi-ai/compat";
+import { isModelType } from "@earendil-works/pi-ai/models";
 import { getBuiltinModels, getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 import {
 	BASE_URL,
@@ -38,13 +39,6 @@ import { fetchCommandCodeUsage } from "./usage.ts";
 import { buildCommandCodeWidgetLine } from "./widget.ts";
 
 export const WIDGET_ID = "command-code-usage";
-
-function chatModels(models: readonly unknown[]): Model[] {
-	return models.filter(
-		(model): model is Model =>
-			typeof model === "object" && model !== null && (model as { type?: unknown }).type === undefined,
-	);
-}
 
 function emitCommandOutput(
 	ctx: ExtensionCommandContext,
@@ -64,56 +58,52 @@ function errorMessage(error: unknown): string {
 }
 
 export function buildCommandCodeProvider(index: ChatCatalogIndex): Provider {
-	let lastKnownModels: Model[] = [];
+	const fallback = fallbackModels(index);
+	let discovered: Model[] = [];
+	const currentModels = () => [...new Map([...fallback, ...discovered].map((model) => [model.id, model])).values()];
 
-	async function fetchModels(context: RefreshModelsContext): Promise<Model[]> {
-		const stored = refreshStoredModelMetadata(chatModels(context.stored?.models ?? []), index);
-		if (stored.length > 0) lastKnownModels = stored;
-		if (context.signal.aborted) return lastKnownModels;
-
-		if (!context.force && isCatalogFresh(context.stored?.checkedAt)) {
-			// Fresh cache. Return it untouched so nothing is wiped and fetches stay idle.
-			if (lastKnownModels.length > 0) return lastKnownModels;
-		}
-		if (!context.allowNetwork) {
-			return lastKnownModels;
-		}
-
-		try {
-			const fetched = await discoverCommandCodeModels(index, context.signal);
-			if (context.signal.aborted) return lastKnownModels;
-			lastKnownModels = fetched;
-			return fetched;
-		} catch (error) {
-			// Keep the last-known-good (or fallback) catalog; a failed refresh must
-			// never clear registered models. Surface the error only when we have
-			// nothing at all to show.
-			if (lastKnownModels.length === 0) throw error;
-			emitWarningOnce(`Command Code model refresh failed; keeping last known catalog (${errorMessage(error)})`);
-			return lastKnownModels;
-		}
-	}
-
-	return createProvider({
+	const transport = createProvider({
 		id: PROVIDER_ID,
 		name: PROVIDER_NAME,
 		baseUrl: BASE_URL,
 		auth: { apiKey: envApiKeyAuth(`${PROVIDER_NAME} API key`, ["COMMAND_CODE_API_KEY"]) },
-		models: fallbackModels(index),
-		fetchModels,
+		models: fallback,
 		api: {
 			"openai-completions": openAICompletionsApi(),
 			"anthropic-messages": anthropicMessagesApi(),
 			"openai-responses": openAIResponsesApi(),
 		},
 	});
-}
 
-let lastRefreshWarning: string | undefined;
-function emitWarningOnce(message: string): void {
-	if (lastRefreshWarning === message) return;
-	lastRefreshWarning = message;
-	console.error(`[command-code] ${message}`);
+	return {
+		...transport,
+		getModels: currentModels,
+		getAllModels: currentModels,
+		async refreshModels(context: RefreshModelsContext): Promise<void> {
+			if (context.signal.aborted) return;
+			const stored = context.stored?.models.filter(
+				(model): model is Model => isModelType(model, "chat") && model.provider === PROVIDER_ID,
+			) ?? [];
+			if (stored.length > 0) {
+				const restored = refreshStoredModelMetadata(stored, index);
+				if (!await context.publish({ update: () => { discovered = restored; } })) return;
+			}
+			if (!context.allowNetwork || context.signal.aborted) return;
+			// Old snapshots with only untyped entries may have been truncated by the
+			// previous chat filter. Recheck them even if their timestamp looks fresh.
+			if (!context.force && stored.some((model) => model.type === "chat") && isCatalogFresh(context.stored?.checkedAt)) return;
+
+			// Publish a new timestamp only after a successful remote check. On
+			// failure, keep the existing catalog and let the refresh caller report it.
+			const models = (await discoverCommandCodeModels(index, context.signal))
+				.map((model) => ({ ...model, type: "chat" as const }));
+			if (context.signal.aborted) return;
+			await context.publish({
+				persist: { models, checkedAt: Date.now() },
+				update: () => { discovered = models; },
+			});
+		},
+	};
 }
 
 export default function (pi: ExtensionAPI): void {
