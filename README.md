@@ -14,7 +14,7 @@ A small collection of extensions for [pi-coding-agent](https://github.com/badlog
 | `git-diff-stats.ts` | Appends whole-branch `+added -deleted` line counts, plus an uncommitted marker, after the branch name on the footer's cwd line | Auto-runs on session start, after agent turns, and after mutating tools | Git repo; TUI mode |
 | `disable-find.ts` | Blocks agent Bash invocations of `find` and directs the agent to use `fd` or `rg` | Auto-runs for agent Bash tool calls | `fd` and `rg` in Pi's managed tool path |
 | `read-url.ts` | Adds a `read_url` tool that reads public URLs as Markdown through Jina Reader | Agent calls `read_url` when it needs external docs | Optional `JINA_API_KEY` for authenticated Jina quota |
-| `usage-widget.ts` | Shows legacy Codex, Antigravity, and OpenCode Go usage bars or an OpenAI subscription quota-unavailable notice | Auto-runs on session start, model change, and after agent turns | Legacy OpenAI Codex auth, Antigravity, OpenCode Go, or OpenAI subscription OAuth |
+| `usage-widget.ts` | Shows legacy Codex, OpenCode Go, and xAI subscription usage bars or an OpenAI subscription quota-unavailable notice | Auto-runs on session start, model change, and after agent turns | Legacy OpenAI Codex auth, OpenCode Go, xAI OAuth, or OpenAI subscription OAuth |
 | `tps.ts` | Reports output tokens per second and token usage after each agent run | Auto-runs after agent turns | Interactive UI |
 
 ## Installation
@@ -356,8 +356,8 @@ Shows usage information or an availability notice for the active provider.
 Handled providers:
 
 - `openai-codex`: legacy Codex subscription usage bars
-- `antigravity`: Gemini or Claude/GPT group usage bars, following the selected model
 - `opencode-go`: OpenCode Go 5h / 7d / 30d usage bars
+- `xai`: SuperGrok / X Premium OAuth weekly credit usage bar; API-key authentication keeps the widget hidden
 - `openai`: ChatGPT subscription OAuth shows a quota-unavailable notice and `https://chatgpt.com/settings/usage`; API-key authentication keeps the widget hidden
 
 Behavior:
@@ -376,6 +376,7 @@ Data sources:
 
 - Legacy Codex: `https://chatgpt.com/backend-api/wham/usage`
 - OpenCode Go: `https://opencode.ai/console/api/go/status`, the same endpoint the console UI reads
+- xAI OAuth subscription: `https://cli-chat-proxy.grok.com/v1/billing?format=credits`
 - Native OpenAI subscription: no supported quota API; the widget makes no usage requests and does not resolve or refresh access tokens
 
 Pi added native OpenAI subscription sign-in in v0.99.0. Its direct OAuth tokens target `api.openai.com` and are rejected by the legacy ChatGPT usage endpoint. OpenAI [confirmed that quota reporting is not currently supported](https://github.com/openai/sign-in-with-chatgpt-devkit/issues/3#issuecomment-5936080960). The widget does not borrow another account's legacy Codex credentials, read browser cookies, or estimate remaining quota from local token counts. Native subscription limits may include app-specific allowances, so legacy plan quota is not a replacement. See OpenAI's [errors and recovery guidance](https://developers.openai.com/siwc/token-sharing-open-source/errors-and-recovery).
@@ -407,7 +408,7 @@ Notifies the interactive UI after an agent run with output tokens per second, in
 | `git-diff-stats.ts` | Replaces the footer, so it conflicts with any other `setFooter` extension (last one to run wins). It reuses the built-in `FooterComponent`, but cannot read the auto-compaction flag, so the stats line always shows `(auto)`. The base branch is resolved from local refs only; after a long gap without fetching, a branch rebased onto newer upstream commits can report a stale merge base. Shows nothing outside a git repo or when the branch has no net change. |
 | `disable-find.ts` | Applies only to agent Bash tool calls. User-initiated `!` and `!!` Bash commands in Pi remain unrestricted. The extension fails to load if its dedicated shim or shared message file is missing. |
 | `read-url.ts` | Reads public URLs through Jina Reader. Set `JINA_API_KEY` only if you want authenticated fallback after anonymous quota is exhausted. |
-| `usage-widget.ts` | Hidden for unsupported providers and OpenAI API keys. Native OpenAI subscription OAuth shows a quota-unavailable notice; refresh failures show sanitized errors, retaining stale data when available. |
+| `usage-widget.ts` | Hidden for unsupported providers, OpenAI API keys, and xAI API keys. Native OpenAI subscription OAuth shows a quota-unavailable notice; refresh failures show sanitized errors, retaining stale data when available. |
 | `tps.ts` | Requires an interactive UI and a completed agent run with output tokens. The reported rate includes tool execution time; cache-hit percentage is omitted when there are no prompt tokens. |
 
 ## License
